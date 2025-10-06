@@ -1,5 +1,4 @@
 import os
-import json
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
@@ -10,12 +9,12 @@ if not BOT_TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN not set")
     raise SystemExit(1)
 
-WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")  # e.g. https://tg-docubridge.onrender.com
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")  # set your own in Render
-PORT = int(os.getenv("PORT", "5000"))  # Render provides PORT
+WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")
+PORT = int(os.getenv("PORT", "5000"))
 
 # ====== TELEBOT ======
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)  # threaded=False — стабильно в webhook-режиме
 
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -25,6 +24,7 @@ def main_menu():
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    print(f"[BOT] received /start from {message.chat.id}")
     bot.send_message(
         message.chat.id,
         "Добро пожаловать в IS-Logix Bot! 😊\n"
@@ -35,6 +35,7 @@ def start(message):
 
 @bot.message_handler(commands=['consult'])
 def consult(message):
+    print(f"[BOT] received /consult from {message.chat.id}")
     bot.send_message(
         message.chat.id,
         "Расскажите о вашем запросе: какой документ, откуда и куда? "
@@ -45,12 +46,10 @@ def consult(message):
 def save_lead(message):
     username = message.from_user.username if getattr(message, "from_user", None) and message.from_user.username else "Unknown"
     try:
-        # На Render ФС эфемерная; для прод лучше БД. Ошибки записи не должны ломать ответы.
         with open('leads.txt', 'a', encoding='utf-8') as f:
             f.write(f"User: {username}, Query: {message.text}\n")
     except Exception as e:
         print(f"[leads.txt] write error: {e}")
-
     bot.send_message(
         message.chat.id,
         "Спасибо! Мы свяжемся с вами скоро. Пока посмотрите новости: "
@@ -60,6 +59,7 @@ def save_lead(message):
 
 @bot.message_handler(commands=['ua_ru'])
 def ua_ru(message):
+    print(f"[BOT] received /ua_ru from {message.chat.id}")
     bot.send_message(
         message.chat.id,
         "Доставка из Украины в Россию: Несмотря на ситуацию, помогаем с доставкой различных документов. "
@@ -69,6 +69,7 @@ def ua_ru(message):
 
 @bot.message_handler(commands=['eu_ua'])
 def eu_ua(message):
+    print(f"[BOT] received /eu_ua from {message.chat.id}")
     bot.send_message(
         message.chat.id,
         "Доставка документов из Европы в Украину: Визы, сертификаты, безопасно. Подробности: "
@@ -77,6 +78,7 @@ def eu_ua(message):
 
 @bot.message_handler(commands=['news'])
 def news(message):
+    print(f"[BOT] received /news from {message.chat.id}")
     bot.send_message(
         message.chat.id,
         "Последние новости по логистике: Изменения в санкциях 2025 "
@@ -84,63 +86,49 @@ def news(message):
         "Подписывайтесь на канал: https://t.me/doki_iz_UA_v_RU_BY"
     )
 
-# ========= Вспомогательный print для отладки =========
-@bot.message_handler(func=lambda message: True, content_types=['text'])
-def handle_all(message):
-    print(f"[BOT] received from {message.chat.id}: {message.text}")
-    if message.text == '/ua_ru':
-        ua_ru(message)
-    elif message.text == '/eu_ua':
-        eu_ua(message)
-    elif message.text == '/news':
-        news(message)
-    elif message.text == '/consult':
-        consult(message)
-    elif message.text == '/start':
-        start(message)
-    else:
-        bot.send_message(message.chat.id, "Команда не распознана. Выберите из меню.", reply_markup=main_menu())
+@bot.message_handler(func=lambda m: True)
+def fallback(message):
+    print(f"[BOT] fallback from {message.chat.id}: {message.text}")
+    bot.send_message(message.chat.id, "Не понял. Выберите команду из меню.", reply_markup=main_menu())
 
-
-# ====== FLASK APP (WEBHOOK SERVER) ======
+# ====== FLASK APP ======
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify(status="ok", service="is-logix-bot")
 
-# --- Основной вебхук с секретом ---
+# --- Основной вебхук (используем строку для Update.de_json) ---
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def webhook_secret():
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            data = json.loads(request.get_data(as_text=True) or "{}")
-        print(">>> GOT UPDATE (secret):", data)
-        update = Update.de_json(data)
+        json_str = request.get_data(cache=False, as_text=True)
+        print(">>> GOT UPDATE (secret):", json_str)
+        update = Update.de_json(json_str)
         bot.process_new_updates([update])
     except Exception as e:
+        import traceback
         print("Webhook SECRET error:", repr(e))
+        traceback.print_exc()
     return "OK", 200
 
-# --- Резервный путь без секрета (на случай рассинхронизации переменных) ---
+# --- Резервный путь без секрета ---
 @app.route("/webhook", methods=["POST"])
 def webhook_fallback():
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            data = json.loads(request.get_data(as_text=True) or "{}")
-        print(">>> GOT UPDATE (fallback):", data)
-        update = Update.de_json(data)
+        json_str = request.get_data(cache=False, as_text=True)
+        print(">>> GOT UPDATE (fallback):", json_str)
+        update = Update.de_json(json_str)
         bot.process_new_updates([update])
     except Exception as e:
+        import traceback
         print("Webhook FALLBACK error:", repr(e))
+        traceback.print_exc()
     return "OK", 200
 
 def ensure_webhook():
-    """Ставит Webhook, если заданы WEBHOOK_BASE и WEBHOOK_SECRET."""
     if not WEBHOOK_BASE:
-        print("WEBHOOK_BASE not set — пропускаю setWebhook. Установите вручную после деплоя.")
+        print("WEBHOOK_BASE not set — пропускаю setWebhook.")
         return
     webhook_url = f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
     try:
@@ -150,11 +138,10 @@ def ensure_webhook():
     except Exception as e:
         print(f"Failed to set webhook: {e}")
 
-# Ставим вебхук при старте gunicorn (однократно)
 ensure_webhook()
 
-# Локальный запуск (для отладки)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
 
