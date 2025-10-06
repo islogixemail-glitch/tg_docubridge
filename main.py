@@ -84,13 +84,23 @@ def news(message):
         "Подписывайтесь на канал: https://t.me/doki_iz_UA_v_RU_BY"
     )
 
-@bot.message_handler(func=lambda m: True)
-def echo(message):
-    text = (message.text or "").lower()
-    if 'консультация' in text or '/consult' in text:
+# ========= Вспомогательный print для отладки =========
+@bot.message_handler(func=lambda message: True, content_types=['text'])
+def handle_all(message):
+    print(f"[BOT] received from {message.chat.id}: {message.text}")
+    if message.text == '/ua_ru':
+        ua_ru(message)
+    elif message.text == '/eu_ua':
+        eu_ua(message)
+    elif message.text == '/news':
+        news(message)
+    elif message.text == '/consult':
         consult(message)
+    elif message.text == '/start':
+        start(message)
     else:
-        bot.send_message(message.chat.id, "Не понял. Выберите команду из меню.", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "Команда не распознана. Выберите из меню.", reply_markup=main_menu())
+
 
 # ====== FLASK APP (WEBHOOK SERVER) ======
 app = Flask(__name__)
