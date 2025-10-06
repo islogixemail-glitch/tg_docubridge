@@ -1,4 +1,5 @@
 import os
+import json
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
@@ -9,7 +10,7 @@ if not BOT_TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN not set")
     raise SystemExit(1)
 
-WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")  # e.g. https://is-logix-bot.onrender.com
+WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")  # e.g. https://tg-docubridge.onrender.com
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")  # set your own in Render
 PORT = int(os.getenv("PORT", "5000"))  # Render provides PORT
 
@@ -42,10 +43,14 @@ def consult(message):
     bot.register_next_step_handler(message, save_lead)
 
 def save_lead(message):
-    username = message.from_user.username if message.from_user and message.from_user.username else "Unknown"
-    # Хранение простое, файл в корне. На Render это ephemeral FS — для прод лучше БД.
-    with open('leads.txt', 'a', encoding='utf-8') as f:
-        f.write(f"User: {username}, Query: {message.text}\n")
+    username = message.from_user.username if getattr(message, "from_user", None) and message.from_user.username else "Unknown"
+    try:
+        # На Render ФС эфемерная; для прод лучше БД. Ошибки записи не должны ломать ответы.
+        with open('leads.txt', 'a', encoding='utf-8') as f:
+            f.write(f"User: {username}, Query: {message.text}\n")
+    except Exception as e:
+        print(f"[leads.txt] write error: {e}")
+
     bot.send_message(
         message.chat.id,
         "Спасибо! Мы свяжемся с вами скоро. Пока посмотрите новости: "
@@ -94,26 +99,40 @@ app = Flask(__name__)
 def health():
     return jsonify(status="ok", service="is-logix-bot")
 
-# Webhook endpoint with secret path for basic protection
+# --- Основной вебхук с секретом ---
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
-def webhook():
+def webhook_secret():
     try:
-        # pyTelegramBotAPI expects raw JSON -> Update.de_json -> process_new_updates
-        json_str = request.get_data(as_text=True)
-        update = Update.de_json(json_str)
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            data = json.loads(request.get_data(as_text=True) or "{}")
+        print(">>> GOT UPDATE (secret):", data)
+        update = Update.de_json(data)
         bot.process_new_updates([update])
     except Exception as e:
-        # Не падаем на ошибке — логируем и возвращаем 200 чтобы Telegram не ретраил бесконечно
-        print(f"Webhook error: {e}")
+        print("Webhook SECRET error:", repr(e))
+    return "OK", 200
+
+# --- Резервный путь без секрета (на случай рассинхронизации переменных) ---
+@app.route("/webhook", methods=["POST"])
+def webhook_fallback():
+    try:
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            data = json.loads(request.get_data(as_text=True) or "{}")
+        print(">>> GOT UPDATE (fallback):", data)
+        update = Update.de_json(data)
+        bot.process_new_updates([update])
+    except Exception as e:
+        print("Webhook FALLBACK error:", repr(e))
     return "OK", 200
 
 def ensure_webhook():
-    """Устанавливает Webhook, если заданы WEBHOOK_BASE и WEBHOOK_SECRET."""
+    """Ставит Webhook, если заданы WEBHOOK_BASE и WEBHOOK_SECRET."""
     if not WEBHOOK_BASE:
         print("WEBHOOK_BASE not set — пропускаю setWebhook. Установите вручную после деплоя.")
         return
     webhook_url = f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
-    # Сначала удалим привязки polling/старые вебхуки, затем установим новый
     try:
         bot.remove_webhook()
         bot.set_webhook(url=webhook_url, drop_pending_updates=True)
@@ -121,10 +140,11 @@ def ensure_webhook():
     except Exception as e:
         print(f"Failed to set webhook: {e}")
 
-# Устанавливаем webhook при импортe модуля (однократно при старте gunicorn)
+# Ставим вебхук при старте gunicorn (однократно)
 ensure_webhook()
 
 # Локальный запуск (для отладки)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
