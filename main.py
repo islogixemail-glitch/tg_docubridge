@@ -47,6 +47,7 @@ def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
     except Exception as e:
         # без падения бота — просто лог
         print(f"[DB] save_message error: {e}")
+
 def get_state(chat_id: int) -> tuple[str, dict]:
     """Вернёт (state, data_dict). Если записи нет — создаст со state='greeting' и пустыми данными."""
     if not DB_URL:
@@ -112,9 +113,10 @@ def update_data(chat_id: int, patch: dict) -> None:
 @bot.message_handler(commands=['start'])
 def start(message):
     print(f"[BOT] received /start from {message.chat.id}")
+    set_state(message.chat.id, "greeting")
     reply = (
-        "Добро пожаловать в IS-Logix Bot! 😊\n"
-        "Мы помогаем с доставкой документов между Украиной, Россией, Беларусью и Европой, несмотря на сложности.\n"
+        "Добро пожаловать в DocuBridgeBot! 😊\n"
+        "Мы помогаем с доставкой документов между Украиной, Россией, Беларусью и Европой.\n"
         "Выберите опцию:"
     )
     save_message(message.chat.id, "/start", reply)
@@ -124,12 +126,36 @@ def start(message):
 @bot.message_handler(commands=['consult'])
 def consult(message):
     print(f"[BOT] received /consult from {message.chat.id}")
+    set_state(message.chat.id, "collecting")
     reply = ("Расскажите о вашем запросе: какой документ, откуда и куда? "
              "(Например: 'Доверенность из Киева в Москву')")
     save_message(message.chat.id, "/consult", reply)
     bot.send_message(message.chat.id, reply)
+    # оставляем register_next_step_handler — он у тебя уже ведёт в save_lead
     bot.register_next_step_handler(message, save_lead)
 
+def save_lead(message):
+    username = message.from_user.username if getattr(message, "from_user", None) and message.from_user.username else "Unknown"
+    # 1) локальный txt как раньше (на всякий)
+    try:
+        with open('leads.txt', 'a', encoding='utf-8') as f:
+            f.write(f"User: {username}, Query: {message.text}\n")
+    except Exception as e:
+        print(f"[leads.txt] write error: {e}")
+
+    # 2) сохраняем в БД (история + user_state.data)
+    update_data(message.chat.id, {
+        "username": username,
+        "lead_text": message.text
+    })
+    set_state(message.chat.id, "ready")
+
+    reply1 = ("Спасибо! Мы свяжемся с вами скоро. Пока посмотрите новости: "
+              "https://www.is-logix.com/section/novosti/")
+    save_message(message.chat.id, message.text, reply1)
+
+    bot.send_message(message.chat.id, reply1)
+    bot.send_message(message.chat.id, "Вернуться в меню?", reply_markup=main_menu())
 
 @bot.message_handler(commands=['ua_ru'])
 def ua_ru(message):
