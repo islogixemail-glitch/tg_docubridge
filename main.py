@@ -1,17 +1,18 @@
 import os
 import psycopg2
-import json
 import psycopg2.extras
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
+from openai import OpenAI
 
 # ====== ENV ======
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN not set")
     raise SystemExit(1)
+
 load_dotenv()  # подтянет DATABASE_URL из .env локально (на Render надо будет задать переменную окружения)
 DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
@@ -20,16 +21,22 @@ if not DB_URL:
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")
 PORT = int(os.getenv("PORT", "5000"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("WARNING: OPENAI_API_KEY не задан — умные ответы отключены")
 
 # ====== TELEBOT ======
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)  # threaded=False — стабильно в webhook-режиме
+
+# ====== OPENAI ======
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton('/consult'), KeyboardButton('/ua_ru'))
     markup.add(KeyboardButton('/eu_ua'), KeyboardButton('/news'))
     return markup
-    
+
 def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
     """Сохраняет одну запись диалога в таблицу chat_history (Neon). Молча пропускает, если DB_URL не задан."""
     if not DB_URL:
@@ -45,7 +52,6 @@ def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
         cur.close()
         conn.close()
     except Exception as e:
-        # без падения бота — просто лог
         print(f"[DB] save_message error: {e}")
 
 def get_state(chat_id: int) -> tuple[str, dict]:
@@ -58,7 +64,6 @@ def get_state(chat_id: int) -> tuple[str, dict]:
         cur.execute("SELECT state, data FROM user_state WHERE chat_id=%s;", (int(chat_id),))
         row = cur.fetchone()
         if row is None:
-            # создать дефолтную запись
             cur.execute(
                 "INSERT INTO user_state (chat_id, state, data) VALUES (%s, %s, %s) ON CONFLICT (chat_id) DO NOTHING;",
                 (int(chat_id), "greeting", psycopg2.extras.Json({}))
@@ -67,7 +72,8 @@ def get_state(chat_id: int) -> tuple[str, dict]:
             result = ("greeting", {})
         else:
             result = (row["state"], row["data"] if row["data"] is not None else {})
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         return result
     except Exception as e:
         print(f"[DB] get_state error: {e}")
@@ -86,7 +92,8 @@ def set_state(chat_id: int, state: str) -> None:
             ON CONFLICT (chat_id) DO UPDATE SET state=EXCLUDED.state, updated_at=NOW();
         """, (int(chat_id), state, psycopg2.extras.Json({})))
         conn.commit()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
     except Exception as e:
         print(f"[DB] set_state error: {e}")
 
@@ -105,10 +112,32 @@ def update_data(chat_id: int, patch: dict) -> None:
                 updated_at = NOW();
         """, (int(chat_id), "greeting", psycopg2.extras.Json(patch)))
         conn.commit()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
     except Exception as e:
         print(f"[DB] update_data error: {e}")
 
+def generate_chatgpt_response(user_message: str, chat_id: int = None) -> str:
+    """Генерирует ответ через OpenAI API."""
+    if not client:
+        return "Извините, умные ответы временно недоступны. Попробуйте позже. 😔"
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Можно заменить на "gpt-4o" для лучших результатов
+            messages=[
+                {"role": "system", "content": "Ты ассистент по логистике документов между Украиной, Россией, Беларусью и Европой. Отвечай кратко, профессионально, на русском, с эмодзи, в стиле дружелюбного консультанта."},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=500,
+            temperature=0.7
+        )
+        reply = response.choices[0].message.content.strip()
+        if DB_URL and chat_id:
+            save_message(chat_id, user_message, reply)
+        return reply
+    except Exception as e:
+        print(f"[OpenAI] Error: {e}")
+        return "Извините, произошла ошибка. Попробуйте позже. 😔"
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -122,7 +151,6 @@ def start(message):
     save_message(message.chat.id, "/start", reply)
     bot.send_message(message.chat.id, reply, reply_markup=main_menu())
 
-
 @bot.message_handler(commands=['consult'])
 def consult(message):
     print(f"[BOT] received /consult from {message.chat.id}")
@@ -131,30 +159,33 @@ def consult(message):
              "(Например: 'Доверенность из Киева в Москву')")
     save_message(message.chat.id, "/consult", reply)
     bot.send_message(message.chat.id, reply)
-    # оставляем register_next_step_handler — он у тебя уже ведёт в save_lead
     bot.register_next_step_handler(message, save_lead)
 
 def save_lead(message):
     username = message.from_user.username if getattr(message, "from_user", None) and message.from_user.username else "Unknown"
-    # 1) локальный txt как раньше (на всякий)
+    # 1) Локальный txt для лидов
     try:
         with open('leads.txt', 'a', encoding='utf-8') as f:
             f.write(f"User: {username}, Query: {message.text}\n")
     except Exception as e:
         print(f"[leads.txt] write error: {e}")
 
-    # 2) сохраняем в БД (история + user_state.data)
+    # 2) Генерация ответа через ChatGPT
+    chatgpt_reply = generate_chatgpt_response(
+        f"Пользователь ({username}) запросил консультацию по доставке документов: {message.text}. "
+        "Дай краткий ответ с предложением помощи и ссылкой на новости: https://www.is-logix.com/section/novosti/",
+        message.chat.id
+    )
+
+    # 3) Сохранение в БД
     update_data(message.chat.id, {
         "username": username,
         "lead_text": message.text
     })
     set_state(message.chat.id, "ready")
 
-    reply1 = ("Спасибо! Мы свяжемся с вами скоро. Пока посмотрите новости: "
-              "https://www.is-logix.com/section/novosti/")
-    save_message(message.chat.id, message.text, reply1)
-
-    bot.send_message(message.chat.id, reply1)
+    # 4) Отправка ответа пользователю
+    bot.send_message(message.chat.id, chatgpt_reply)
     bot.send_message(message.chat.id, "Вернуться в меню?", reply_markup=main_menu())
 
 @bot.message_handler(commands=['ua_ru'])
@@ -167,7 +198,6 @@ def ua_ru(message):
     )
     save_message(message.chat.id, "/ua_ru", reply)
     bot.send_message(message.chat.id, reply)
-
 
 @bot.message_handler(commands=['eu_ua'])
 def eu_ua(message):
@@ -196,11 +226,10 @@ def fallback(message):
     state, data = get_state(message.chat.id)
 
     if state == "collecting":
-        # Любой текст считаем входом для лида (минимальная реализация Smart Router)
         return save_lead(message)
 
-    reply = "Не понял. Выберите команду из меню."
-    save_message(message.chat.id, message.text, reply)
+    # Используем ChatGPT для ответа на произвольные сообщения
+    reply = generate_chatgpt_response(message.text, message.chat.id)
     bot.send_message(message.chat.id, reply, reply_markup=main_menu())
 
 # ====== FLASK APP ======
@@ -208,33 +237,37 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify(status="ok", service="is-logix-bot")
+    return jsonify(status="ok", service="docu-bridge-bot")
 
-# --- Основной вебхук (используем строку для Update.de_json) ---
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def webhook_secret():
     try:
         json_str = request.get_data(cache=False, as_text=True)
-        print(">>> GOT UPDATE (secret):", json_str)
+        print(f">>> GOT UPDATE (secret): {json_str[:100]}...")
         update = Update.de_json(json_str)
+        if not update:
+            print("Failed to parse update")
+            return "Invalid update", 400
         bot.process_new_updates([update])
     except Exception as e:
         import traceback
-        print("Webhook SECRET error:", repr(e))
+        print(f"Webhook SECRET error: {repr(e)}")
         traceback.print_exc()
     return "OK", 200
 
-# --- Резервный путь без секрета ---
 @app.route("/webhook", methods=["POST"])
 def webhook_fallback():
     try:
         json_str = request.get_data(cache=False, as_text=True)
-        print(">>> GOT UPDATE (fallback):", json_str)
+        print(f">>> GOT UPDATE (fallback): {json_str[:100]}...")
         update = Update.de_json(json_str)
+        if not update:
+            print("Failed to parse update")
+            return "Invalid update", 400
         bot.process_new_updates([update])
     except Exception as e:
         import traceback
-        print("Webhook FALLBACK error:", repr(e))
+        print(f"Webhook FALLBACK error: {repr(e)}")
         traceback.print_exc()
     return "OK", 200
 
@@ -253,7 +286,7 @@ def ensure_webhook():
 ensure_webhook()
 
 if __name__ == "__main__":
+    print(f"Starting Flask on host=0.0.0.0, port={PORT}")
     app.run(host="0.0.0.0", port=PORT)
-
 
 
