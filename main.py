@@ -220,6 +220,11 @@ def news(message):
     save_message(message.chat.id, "/news", reply)
     bot.send_message(message.chat.id, reply)
 
+@bot.message_handler(commands=['ai'])
+def ai_ping(message):
+    reply = generate_chatgpt_response("Ответь одним словом: OK", message.chat.id)
+    bot.send_message(message.chat.id, f"AI: {reply}")
+
 @bot.message_handler(func=lambda m: True)
 def fallback(message):
     print(f"[BOT] fallback from {message.chat.id}: {message.text}")
