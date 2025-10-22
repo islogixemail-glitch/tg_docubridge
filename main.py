@@ -1,9 +1,11 @@
 # main.py — DocuBridge Bot (Flask + TeleBot + OpenAI + Postgres)
-# Готов к деплою на Render с командой: gunicorn main:app --timeout 120
+# Команда запуска на Render: gunicorn main:app --timeout 120
 
 import os
+import re
 import json
 import traceback
+from typing import Optional, Dict, Tuple
 from datetime import datetime
 
 from flask import Flask, request, jsonify
@@ -86,8 +88,8 @@ def ensure_tables():
     except Exception as e:
         print(f"[DB] ensure_tables error: {e}")
 
-def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
-    # Пишем историю и дублируем админу
+def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str]):
+    # Пишем историю
     try:
         if DB_URL:
             conn = get_conn()
@@ -113,7 +115,7 @@ def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
     except Exception as e:
         print(f"[ADMIN notify] save_message notify error: {e}")
 
-def get_state(chat_id: int):
+def get_state(chat_id: int) -> Tuple[str, Dict]:
     try:
         if not DB_URL:
             return ("greeting", {})
@@ -148,7 +150,7 @@ def set_state(chat_id: int, state: str):
     except Exception as e:
         print(f"[DB] set_state error: {e}")
 
-def update_data(chat_id: int, new_data: dict):
+def update_data(chat_id: int, new_data: Dict):
     try:
         if not DB_URL:
             return
@@ -189,6 +191,7 @@ def generate_chatgpt_response(user_message: str, chat_id: int) -> str:
         print(f"[OpenAI] error: {e}")
         return "Извините, временная техническая пауза. Попробуйте ещё раз через минуту."
 
+# ---------- Поля заявки ----------
 REQUIRED_FIELDS = [
     "doc_type",
     "from_country", "from_city",
@@ -198,18 +201,61 @@ REQUIRED_FIELDS = [
     "name", "phone", "email", "best_time"
 ]
 
-def calc_weight_if_needed(d: dict) -> dict:
+# ---------- Локальный парсер чисел ----------
+RUS_NUMS = {
+    "ноль":0,"один":1,"два":2,"три":3,"четыре":4,"пять":5,"шесть":6,"семь":7,"восемь":8,"девять":9,
+    "десять":10,"одиннадцать":11,"двенадцать":12,"тринадцать":13,"четырнадцать":14,"пятнадцать":15,
+    "шестнадцать":16,"семнадцать":17,"восемнадцать":18,"девятнадцать":19,
+    "двадцать":20,"тридцать":30,"сорок":40,"пятьдесят":50,"шестьдесят":60,"семьдесят":70,"восемьдесят":80,"девяносто":90,
+    "сто":100
+}
+
+def parse_int_from_text(text: str) -> Optional[int]:
+    if not text:
+        return None
+    s = text.strip().lower()
+    # 1) цифры
+    m = re.search(r"\d+", s)
+    if m:
+        try:
+            return int(m.group())
+        except:
+            pass
+    # 2) слова («двадцать пять», «десять», «до десяти»)
+    tokens = re.findall(r"[а-яё]+", s)
+    total = 0
+    last = 0
+    had_word = False
+    for t in tokens:
+        if t in RUS_NUMS:
+            had_word = True
+            val = RUS_NUMS[t]
+            # «двадцать пять» → 20 + 5
+            if val >= 20 and val % 10 == 0:
+                last = val
+            else:
+                if last:
+                    total += last + val
+                    last = 0
+                else:
+                    total += val
+    if had_word:
+        return total if total > 0 else (last if last > 0 else None)
+    return None
+
+# ---------- Нормализация/валидация ----------
+def calc_weight_if_needed(d: Dict) -> Dict:
     try:
         pages = int(d.get("pages_a4") or 0)
     except:
         pages = 0
     w = d.get("weight_grams")
     if (not w or int(w) == 0) and pages > 0:
-        # грубо: ~6 г/лист, округление к кратному 6 г
+        # ~6 г/лист, округление к кратному 6 г
         d["weight_grams"] = int((pages * 6 + 5) // 6 * 6)
     return d
 
-def normalize_and_validate(d: dict) -> tuple[dict, list]:
+def normalize_and_validate(d: Dict) -> Tuple[Dict, list]:
     errors = []
     # Страны — только Украина / Россия / Беларусь
     allowed_countries = {"Украина", "Россия", "Беларусь"}
@@ -238,13 +284,14 @@ def normalize_and_validate(d: dict) -> tuple[dict, list]:
     d = calc_weight_if_needed(d)
     return d, errors
 
-def is_complete(d: dict) -> bool:
+def is_complete(d: Dict) -> bool:
     for k in REQUIRED_FIELDS:
         if k not in d or d[k] in (None, "", 0):
             return False
     return True
 
-def extract_fields_via_openai(text: str, current_data: dict) -> dict:
+# ---------- Экстракция полей через OpenAI (JSON) ----------
+def extract_fields_via_openai(text: str, current_data: Dict) -> Dict:
     """Просим OpenAI вернуть ТОЛЬКО JSON с нужными ключами."""
     if not client:
         return {}
@@ -290,10 +337,87 @@ def extract_fields_via_openai(text: str, current_data: dict) -> dict:
         print(f"[OpenAI extract] error: {e}")
         return {}
 
-def notify_admin_lead(chat_id: int, payload: dict):
+# ---------- Tariff & ETA ----------
+TARIFF_TABLE = [
+    (50, 60),   # ≤50 г → €60
+    (100, 65),  # ≤100 г → €65
+    (500, 85),  # ≤500 г → €85
+]
+# Примечание: для РФ/РБ → UA действует оффер "от €50" для веса ≤50 г.
+
+def pick_base_price(weight_grams: int) -> Tuple[Optional[int], Optional[int]]:
+    """Вернёт (base_price, threshold) или (None, None) если >500 г."""
+    try:
+        w = int(weight_grams or 0)
+    except:
+        w = 0
+    for threshold, price in TARIFF_TABLE:
+        if w <= threshold:
+            return price, threshold
+    return None, None  # >500 г — по согласованию
+
+def compute_tariff_and_eta(d: Dict) -> Dict:
+    """
+    Возвращает:
+    {
+      "price_eur": int|None,
+      "threshold_g": int|None,
+      "eta_text": str,
+      "notes": str|None
+    }
+    """
+    from_c = (d.get("from_country") or "").strip().title()
+    to_c   = (d.get("to_country")   or "").strip().title()
+    weight = int(d.get("weight_grams") or 0)
+
+    base_price, threshold = pick_base_price(weight)
+
+    # Сроки
+    if from_c == "Украина" and to_c == "Россия":
+        eta = "27–29 дней"
+    elif from_c == "Украина" and to_c == "Беларусь":
+        eta = "21–23 дня"
+    elif (from_c in {"Россия", "Беларусь"} and to_c == "Украина"):
+        eta = "уточним при оформлении (ориентир: 21–29 дней)"
+    else:
+        eta = "требует подтверждения маршрута"
+
+    price = base_price
+    notes = None
+
+    # Спец-минимум "от €50" для РФ/РБ → UA (≤50 г)
+    if (from_c in {"Россия", "Беларусь"} and to_c == "Украина") and threshold == 50:
+        price = 50
+        notes = "спец-тариф для РФ/РБ → UA (до 50 г)"
+
+    if base_price is None:
+        return {
+            "price_eur": None,
+            "threshold_g": None,
+            "eta_text": eta,
+            "notes": "вес свыше 500 г — рассчитаем индивидуально"
+        }
+
+    return {
+        "price_eur": price,
+        "threshold_g": threshold,
+        "eta_text": eta,
+        "notes": notes
+    }
+
+def notify_admin_lead(chat_id: int, payload: Dict):
     if not ADMIN_CHAT_ID:
         return
     try:
+        quote = compute_tariff_and_eta(payload)
+        price_line = (
+            f"Оценка: €{quote['price_eur']} (до {quote['threshold_g']} г)"
+            if quote.get("price_eur") is not None else
+            "Оценка: по согласованию (>500 г)"
+        )
+        eta_line = f"Срок: {quote['eta_text']}"
+        note_line = f"Примечание: {quote['notes']}" if quote.get("notes") else None
+
         summary_lines = [
             "🟢 *Новый лид (DocuBridge)*",
             f"Chat ID: `{chat_id}`",
@@ -308,7 +432,13 @@ def notify_admin_lead(chat_id: int, payload: dict):
             f"Телефон: {payload.get('phone') or '—'}",
             f"Email: {payload.get('email') or '—'}",
             f"Лучшее время связи: {payload.get('best_time') or '—'}",
+            "",
+            price_line,
+            eta_line
         ]
+        if note_line:
+            summary_lines.append(note_line)
+
         bot.send_message(ADMIN_CHAT_ID, "\n".join(summary_lines), parse_mode="Markdown")
     except Exception as e:
         print(f"[ADMIN notify] lead notify error: {e}")
@@ -334,6 +464,8 @@ def start(message):
 @bot.message_handler(commands=['consult'])
 def consult(message):
     set_state(message.chat.id, "collecting")
+    # сброс ожидания конкретного поля
+    update_data(message.chat.id, {"_expected": None})
     q = "Начнём оформление 📋\nКоротко опишите задачу: тип документа и маршрут (откуда → куда)."
     save_message(message.chat.id, "/consult", q)
     bot.send_message(message.chat.id, q)
@@ -368,9 +500,21 @@ def fallback(message):
         pass
 
     if state == "collecting":
+        data = data or {}
+        expected = data.get("_expected")
+
+        local: Dict = {}
+
+        # Локальный разбор чисел, если ждём числовое поле
+        if expected in ("pages_a4", "weight_grams"):
+            n = parse_int_from_text(user_text)
+            if n is not None and n > 0:
+                local[expected] = n
+
         # 1) Экстракция и слияние
         extracted = extract_fields_via_openai(user_text, data)
-        merged = {**(data or {}), **(extracted or {})}
+        merged = {**(data or {}), **(extracted or {}), **local}
+
         # 2) Нормализация/валидация
         merged, val_errors = normalize_and_validate(merged)
         update_data(message.chat.id, merged)
@@ -392,6 +536,15 @@ def fallback(message):
             except Exception as e:
                 print(f"[DB] INSERT lead error: {e}")
 
+            # расчёт квоты
+            quote = compute_tariff_and_eta(merged)
+            price_line = (
+                f"Стоимость: €{quote['price_eur']} (до {quote['threshold_g']} г)"
+                if quote.get("price_eur") is not None else
+                "Стоимость: по согласованию (>500 г)"
+            )
+            eta_line = f"Срок доставки: {quote['eta_text']}"
+
             # уведомить администратора
             notify_admin_lead(message.chat.id, merged)
 
@@ -400,9 +553,11 @@ def fallback(message):
                 f"Маршрут: {merged.get('from_city')}, {merged.get('from_country')} → "
                 f"{merged.get('to_city')}, {merged.get('to_country')}\n"
                 f"Листов A4: {merged.get('pages_a4')} (≈ {merged.get('weight_grams')} г)\n"
+                f"{price_line}\n"
+                f"{eta_line}\n\n"
                 f"Связаться: {merged.get('name')}, {merged.get('phone')}, {merged.get('email')} "
                 f"({merged.get('best_time')})\n\n"
-                "Наш менеджер свяжется с вами в ближайшее время. Если нужно что-то изменить — просто напишите."
+                "Если всё верно — подтвердите. Если нужно что-то изменить — просто напишите."
             )
             save_message(message.chat.id, user_text, reply)
             bot.send_message(message.chat.id, reply, reply_markup=main_menu())
@@ -424,16 +579,28 @@ def fallback(message):
             "email": "Электронная почта:",
             "best_time": "Когда вам удобнее принимать звонок/сообщение?"
         }
+
+        next_key = None
         for key in REQUIRED_FIELDS:
             if not merged.get(key):
-                q = questions[key]
-                save_message(message.chat.id, user_text, q)
-                bot.send_message(message.chat.id, q)
-                return
+                next_key = key
+                break
 
-        # Если здесь — поля заполнены, но есть ошибки валидации
-        if val_errors:
+        if val_errors and not next_key:
+            # поля есть, но есть ошибки — попросим уточнить
             q = "Обнаружены ошибки: " + "; ".join(val_errors) + ". Уточните, пожалуйста."
+            save_message(message.chat.id, user_text, q)
+            bot.send_message(message.chat.id, q)
+            # зафиксируем ожидание (если касается конкретного поля)
+            if "phone" in ";".join(val_errors).lower():
+                merged["_expected"] = "phone"
+            update_data(message.chat.id, merged)
+            return
+
+        if next_key:
+            q = questions[next_key]
+            merged["_expected"] = next_key
+            update_data(message.chat.id, merged)
             save_message(message.chat.id, user_text, q)
             bot.send_message(message.chat.id, q)
             return
