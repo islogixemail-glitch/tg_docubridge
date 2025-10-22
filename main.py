@@ -96,7 +96,7 @@ def news(message):
     reply = (
         "Последние новости по логистике: Изменения в санкциях 2025 "
         "(https://www.is-logix.com/section/novosti/). "
-        "Подписывайтесь на канал: https://t.me/doki_iz_UA_v_RU_BY"
+        "Подписывайтесь на канал: https://t.me/DocuBridgeInfo"
     )
     save_message(message.chat.id, "/news", reply)
     bot.send_message(message.chat.id, reply)
