@@ -1,4 +1,6 @@
 import os
+import psycopg2
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
@@ -8,6 +10,10 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN not set")
     raise SystemExit(1)
+load_dotenv()  # подтянет DATABASE_URL из .env локально (на Render надо будет задать переменную окружения)
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    print("WARNING: DATABASE_URL не задан — сохранение истории отключено")
 
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")
@@ -21,75 +27,86 @@ def main_menu():
     markup.add(KeyboardButton('/consult'), KeyboardButton('/ua_ru'))
     markup.add(KeyboardButton('/eu_ua'), KeyboardButton('/news'))
     return markup
+    
+def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
+    """Сохраняет одну запись диалога в таблицу chat_history (Neon). Молча пропускает, если DB_URL не задан."""
+    if not DB_URL:
+        return
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO chat_history (chat_id, user_message, bot_reply) VALUES (%s, %s, %s)",
+            (int(chat_id), user_text, bot_reply)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        # без падения бота — просто лог
+        print(f"[DB] save_message error: {e}")
 
 @bot.message_handler(commands=['start'])
 def start(message):
     print(f"[BOT] received /start from {message.chat.id}")
-    bot.send_message(
-        message.chat.id,
+    reply = (
         "Добро пожаловать в IS-Logix Bot! 😊\n"
         "Мы помогаем с доставкой документов между Украиной, Россией, Беларусью и Европой, несмотря на сложности.\n"
-        "Выберите опцию:",
-        reply_markup=main_menu()
+        "Выберите опцию:"
     )
+    save_message(message.chat.id, "/start", reply)
+    bot.send_message(message.chat.id, reply, reply_markup=main_menu())
+
 
 @bot.message_handler(commands=['consult'])
 def consult(message):
     print(f"[BOT] received /consult from {message.chat.id}")
-    bot.send_message(
-        message.chat.id,
-        "Расскажите о вашем запросе: какой документ, откуда и куда? "
-        "(Например: 'Доверенность из Киева в Москву')"
-    )
+    reply = ("Расскажите о вашем запросе: какой документ, откуда и куда? "
+             "(Например: 'Доверенность из Киева в Москву')")
+    save_message(message.chat.id, "/consult", reply)
+    bot.send_message(message.chat.id, reply)
     bot.register_next_step_handler(message, save_lead)
 
-def save_lead(message):
-    username = message.from_user.username if getattr(message, "from_user", None) and message.from_user.username else "Unknown"
-    try:
-        with open('leads.txt', 'a', encoding='utf-8') as f:
-            f.write(f"User: {username}, Query: {message.text}\n")
-    except Exception as e:
-        print(f"[leads.txt] write error: {e}")
-    bot.send_message(
-        message.chat.id,
-        "Спасибо! Мы свяжемся с вами скоро. Пока посмотрите новости: "
-        "https://www.is-logix.com/section/novosti/"
-    )
-    bot.send_message(message.chat.id, "Вернуться в меню?", reply_markup=main_menu())
 
 @bot.message_handler(commands=['ua_ru'])
 def ua_ru(message):
     print(f"[BOT] received /ua_ru from {message.chat.id}")
-    bot.send_message(
-        message.chat.id,
+    reply = (
         "Доставка из Украины в Россию: Несмотря на ситуацию, помогаем с доставкой различных документов. "
         "Есть некоторые ограничения. Гайд: https://www.is-logix.com/section/novosti/.\n"
         "Нужна помощь? /consult"
     )
+    save_message(message.chat.id, "/ua_ru", reply)
+    bot.send_message(message.chat.id, reply)
+
 
 @bot.message_handler(commands=['eu_ua'])
 def eu_ua(message):
     print(f"[BOT] received /eu_ua from {message.chat.id}")
-    bot.send_message(
-        message.chat.id,
+    reply = (
         "Доставка документов из Европы в Украину: Визы, сертификаты, безопасно. Подробности: "
         "https://www.is-logix.com/section/novosti/.\nКонсультация: /consult"
     )
+    save_message(message.chat.id, "/eu_ua", reply)
+    bot.send_message(message.chat.id, reply)
 
 @bot.message_handler(commands=['news'])
 def news(message):
     print(f"[BOT] received /news from {message.chat.id}")
-    bot.send_message(
-        message.chat.id,
+    reply = (
         "Последние новости по логистике: Изменения в санкциях 2025 "
         "(https://www.is-logix.com/section/novosti/). "
         "Подписывайтесь на канал: https://t.me/doki_iz_UA_v_RU_BY"
     )
+    save_message(message.chat.id, "/news", reply)
+    bot.send_message(message.chat.id, reply)
 
 @bot.message_handler(func=lambda m: True)
 def fallback(message):
     print(f"[BOT] fallback from {message.chat.id}: {message.text}")
-    bot.send_message(message.chat.id, "Не понял. Выберите команду из меню.", reply_markup=main_menu())
+    reply = "Не понял. Выберите команду из меню."
+    save_message(message.chat.id, message.text, reply)
+    bot.send_message(message.chat.id, reply, reply_markup=main_menu())
 
 # ====== FLASK APP ======
 app = Flask(__name__)
