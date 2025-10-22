@@ -1,11 +1,9 @@
-# main.py — DocuBridge Bot (Flask + TeleBot + Postgres + простой визард)
-# Запуск на Render: gunicorn main:app --timeout 120
-
 import os
 import re
 import json
 import traceback
 from typing import Optional, Dict, Tuple
+import threading # <-- ДОБАВЛЕНО: для фоновой обработки
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -394,7 +392,7 @@ def main_menu():
 @bot.message_handler(commands=['start'])
 def start(message):
     msg=("Добро пожаловать в IS-Logix DocuBridge! 🇸🇰📄\n"
-         "Нажмите /consult чтобы начать расчёт и оформление заявки.")
+        "Нажмите /consult чтобы начать расчёт и оформление заявки.")
     save_message(message.chat.id, "/start", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
 
@@ -415,7 +413,7 @@ def reset(message):
 @bot.message_handler(commands=['news'])
 def news(message):
     msg=("Новости DocuBridge: https://t.me/DocuBridgeInfo\n"
-         "Готов помочь с вашим кейсом — /consult.")
+        "Готов помочь с вашим кейсом — /consult.")
     save_message(message.chat.id, "/news", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
 
@@ -435,16 +433,27 @@ def any_text(message):
 def index():
     return "OK", 200
 
+# Вспомогательная функция, которая запускает обработку в фоне
+def process_update_async(data):
+    try:
+        update=Update.de_json(json.loads(data.decode("utf-8")))
+        bot.process_new_updates([update])
+    except Exception as e:
+        print("[Webhook] Async error:", e); traceback.print_exc()
+
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def telegram_webhook():
-    try:
-        if request.headers.get("content-type")=="application/json":
-            update=Update.de_json(json.loads(request.get_data().decode("utf-8")))
-            bot.process_new_updates([update])
-        else:
-            print("[Webhook] Unsupported content-type")
-    except Exception as e:
-        print("[Webhook] error:", e); traceback.print_exc()
+    # 1. Получаем данные
+    data = request.get_data()
+    
+    # 2. Запускаем обработку в отдельном потоке
+    if request.headers.get("content-type")=="application/json":
+        thread = threading.Thread(target=process_update_async, args=(data,))
+        thread.start()
+    else:
+        print("[Webhook] Unsupported content-type")
+        
+    # 3. МГНОВЕННО возвращаем 200 OK
     return "OK", 200
 
 def ensure_webhook():
