@@ -1,5 +1,7 @@
 import os
 import psycopg2
+import json
+import psycopg2.extras
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import telebot
@@ -45,6 +47,67 @@ def save_message(chat_id: int, user_text: str | None, bot_reply: str | None):
     except Exception as e:
         # без падения бота — просто лог
         print(f"[DB] save_message error: {e}")
+def get_state(chat_id: int) -> tuple[str, dict]:
+    """Вернёт (state, data_dict). Если записи нет — создаст со state='greeting' и пустыми данными."""
+    if not DB_URL:
+        return "greeting", {}
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT state, data FROM user_state WHERE chat_id=%s;", (int(chat_id),))
+        row = cur.fetchone()
+        if row is None:
+            # создать дефолтную запись
+            cur.execute(
+                "INSERT INTO user_state (chat_id, state, data) VALUES (%s, %s, %s) ON CONFLICT (chat_id) DO NOTHING;",
+                (int(chat_id), "greeting", psycopg2.extras.Json({}))
+            )
+            conn.commit()
+            result = ("greeting", {})
+        else:
+            result = (row["state"], row["data"] if row["data"] is not None else {})
+        cur.close(); conn.close()
+        return result
+    except Exception as e:
+        print(f"[DB] get_state error: {e}")
+        return "greeting", {}
+
+def set_state(chat_id: int, state: str) -> None:
+    """Установит новое состояние пользователя и обновит updated_at."""
+    if not DB_URL:
+        return
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_state (chat_id, state, data, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (chat_id) DO UPDATE SET state=EXCLUDED.state, updated_at=NOW();
+        """, (int(chat_id), state, psycopg2.extras.Json({})))
+        conn.commit()
+        cur.close(); conn.close()
+    except Exception as e:
+        print(f"[DB] set_state error: {e}")
+
+def update_data(chat_id: int, patch: dict) -> None:
+    """Сольёт patch в поле data (JSONB) и обновит updated_at."""
+    if not DB_URL:
+        return
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_state (chat_id, state, data, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (chat_id) DO UPDATE
+            SET data = COALESCE(user_state.data, '{}'::jsonb) || EXCLUDED.data,
+                updated_at = NOW();
+        """, (int(chat_id), "greeting", psycopg2.extras.Json(patch)))
+        conn.commit()
+        cur.close(); conn.close()
+    except Exception as e:
+        print(f"[DB] update_data error: {e}")
+
 
 @bot.message_handler(commands=['start'])
 def start(message):
