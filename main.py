@@ -7,16 +7,16 @@ import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
 from openai import OpenAI
 
+load_dotenv()  # подтянет DATABASE_URL из .env локально (на Render надо будет задать переменную окружения)
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    print("WARNING: DATABASE_URL не задан — сохранение истории отключено")
+
 # ====== ENV ======
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN not set")
     raise SystemExit(1)
-
-load_dotenv()  # подтянет DATABASE_URL из .env локально (на Render надо будет задать переменную окружения)
-DB_URL = os.getenv("DATABASE_URL")
-if not DB_URL:
-    print("WARNING: DATABASE_URL не задан — сохранение истории отключено")
 
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")
