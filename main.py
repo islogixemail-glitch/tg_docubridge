@@ -193,6 +193,12 @@ def news(message):
 @bot.message_handler(func=lambda m: True)
 def fallback(message):
     print(f"[BOT] fallback from {message.chat.id}: {message.text}")
+    state, data = get_state(message.chat.id)
+
+    if state == "collecting":
+        # Любой текст считаем входом для лида (минимальная реализация Smart Router)
+        return save_lead(message)
+
     reply = "Не понял. Выберите команду из меню."
     save_message(message.chat.id, message.text, reply)
     bot.send_message(message.chat.id, reply, reply_markup=main_menu())
