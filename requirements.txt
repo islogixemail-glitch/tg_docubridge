@@ -1,5 +1,5 @@
-# --- Основные зависимости ---
-pyTelegramBotAPI==4.21.0
 Flask==3.0.3
-gunicorn==23.0.0
-openai==1.40.0  # Актуальная версия на октябрь 2025
+pyTelegramBotAPI==4.22.1
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+openai==1.40.0
