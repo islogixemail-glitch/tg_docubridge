@@ -16,7 +16,7 @@ from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
 
 import psycopg2
 import psycopg2.extras
-
+from psycopg2 import pool
 from openai import OpenAI
 
 # ------------ ENV ------------
@@ -38,13 +38,38 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ------------ App/Bot/AI ------------
 app = Flask(__name__)
-bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 print(f"[OpenAI] client is {'ON' if client else 'OFF'}")
 
-# ------------ DB ------------
+# ------------ DB Connection Pool ------------
+connection_pool = None
+
+def init_db_pool():
+    """Инициализирует пул соединений с БД"""
+    global connection_pool
+    if not DB_URL:
+        return
+    try:
+        connection_pool = pool.SimpleConnectionPool(
+            minconn=1,      # минимум 1 соединение
+            maxconn=10,     # максимум 10 соединений
+            dsn=DB_URL
+        )
+        print("[DB] Connection pool created")
+    except Exception as e:
+        print(f"[DB] Pool creation error: {e}")
+
 def get_conn():
-    return psycopg2.connect(DB_URL) if DB_URL else None
+    """Получает соединение из пула"""
+    if not connection_pool:
+        return psycopg2.connect(DB_URL) if DB_URL else None
+    return connection_pool.getconn()
+
+def return_conn(conn):
+    """Возвращает соединение в пул"""
+    if connection_pool and conn:
+        connection_pool.putconn(conn)
 
 def ensure_tables():
     if not DB_URL:
@@ -72,33 +97,105 @@ def ensure_tables():
           payload JSONB NOT NULL,
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
+        -- НОВАЯ ТАБЛИЦА для защиты от дублей:
+        CREATE TABLE IF NOT EXISTS processed_updates (
+          update_id BIGINT PRIMARY KEY,
+          processed_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        -- Индекс для автоочистки старых записей (старше 7 дней)
+        CREATE INDEX IF NOT EXISTS idx_processed_updates_time 
+          ON processed_updates(processed_at);
         """)
         conn.commit(); cur.close(); conn.close()
         print("[DB] ensure_tables OK")
     except Exception as e:
         print(f"[DB] ensure_tables error: {e}")
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()
 
+def is_update_processed(update_id: int) -> bool:
+    """Проверяет, было ли обновление уже обработано"""
+    if not DB_URL:
+        return False  # Без БД не можем проверить
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM processed_updates WHERE update_id = %s", 
+            (update_id,)
+        )
+        exists = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return exists
+    except Exception as e:
+        print(f"[DB] is_update_processed error: {e}")
+        return False  # В случае ошибки пропускаем проверку
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()
+            
+def mark_update_processed(update_id: int):
+    """Отмечает обновление как обработанное"""
+    if not DB_URL:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO processed_updates (update_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (update_id,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[DB] mark_update_processed error: {e}")
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()
+
+def cleanup_old_updates():
+    """Удаляет записи старше 7 дней из processed_updates"""
+    if not DB_URL:
+        return
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM processed_updates 
+            WHERE processed_at < NOW() - INTERVAL '7 days'
+        """)
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        print(f"[DB] Cleaned up {deleted} old update records")
+    except Exception as e:
+        print(f"[DB] cleanup_old_updates error: {e}")
+    finally:
+        if conn:
+            return_conn(conn)
+            
 def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str]):
+    conn = None
     try:
         if DB_URL:
             conn = get_conn()
             cur = conn.cursor()
             cur.execute("""INSERT INTO chat_history(chat_id,user_message,bot_reply)
                            VALUES(%s,%s,%s)""", (int(chat_id), user_text, bot_reply))
-            conn.commit(); cur.close(); conn.close()
+            conn.commit()
+            cur.close()
     except Exception as e:
         print(f"[DB] save_message error: {e}")
-
-    # уведомление админу о каждом шаге диалога
-    try:
-        if ADMIN_CHAT_ID:
-            u = f"👤{chat_id}: {user_text}" if user_text else None
-            b = f"🤖Bot: {bot_reply}" if bot_reply else None
-            lines = [l for l in (u, b) if l]
-            if lines:
-                bot.send_message(ADMIN_CHAT_ID, "\n".join(lines))
-    except Exception as e:
-        print(f"[ADMIN notify] save_message notify error: {e}")
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()
+    
+    # УДАЛИЛИ блок с отправкой уведомлений админу!
+    # Уведомления будут только при завершении визарда (в notify_admin_lead)
 
 def get_state(chat_id: int) -> Tuple[str, Dict]:
     try:
@@ -112,6 +209,9 @@ def get_state(chat_id: int) -> Tuple[str, Dict]:
     except Exception as e:
         print(f"[DB] get_state error: {e}")
         return ("greeting", {})
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()    
 
 def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
     try:
@@ -126,7 +226,10 @@ def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         print(f"[DB] set_state error: {e}")
-
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()
+            
 def update_data(chat_id: int, new_data: Dict):
     try:
         if not DB_URL: return
@@ -137,7 +240,10 @@ def update_data(chat_id: int, new_data: Dict):
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         print(f"[DB] update_data error: {e}")
-
+    finally:
+        if conn:
+            return_conn(conn)  # Возвращаем в пул вместо close()
+            
 # ------------ OpenAI (только вне визарда) ------------
 def ai_reply(text: str) -> str:
     if not client:
@@ -149,7 +255,7 @@ def ai_reply(text: str) -> str:
                 {"role":"system","content":"Ты вежливый логист-ассистент DocuBridge. Отвечай по делу и кратко, на русском."},
                 {"role":"user","content":text}
             ],
-            temperature=0.6, max_tokens=500
+            temperature=0.6, max_tokens=500, timeout=30
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
@@ -443,19 +549,29 @@ def process_update_async(data):
 
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def telegram_webhook():
-    # 1. Получаем данные
-    data = request.get_data()
-    
-    # 2. Запускаем обработку в отдельном потоке
-    if request.headers.get("content-type")=="application/json":
-        thread = threading.Thread(target=process_update_async, args=(data,))
-        thread.start()
-    else:
-        print("[Webhook] Unsupported content-type")
-        
-    # 3. МГНОВЕННО возвращаем 200 OK
+    try:
+        if request.headers.get("content-type") == "application/json":
+            json_data = json.loads(request.get_data().decode("utf-8"))
+            update = Update.de_json(json_data)
+            
+            # ЗАЩИТА ОТ ДУБЛЕЙ: проверяем update_id
+            update_id = update.update_id
+            if is_update_processed(update_id):
+                print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
+                return "OK", 200
+            
+            # Отмечаем как обработанный ДО обработки (важно!)
+            mark_update_processed(update_id)
+            
+            # Теперь обрабатываем
+            bot.process_new_updates([update])
+        else:
+            print("[Webhook] Unsupported content-type")
+    except Exception as e:
+        print("[Webhook] error:", e)
+        traceback.print_exc()
     return "OK", 200
-
+        
 def ensure_webhook():
     try:
         if not WEBHOOK_BASE:
@@ -469,6 +585,7 @@ def ensure_webhook():
         print(f"[Webhook] set error: {e}")
 
 # ------------ Entrypoint ------------
+init_db_pool()      # Создаем пул соединений
 ensure_tables()
 ensure_webhook()
 
