@@ -396,6 +396,18 @@ def base_price(weight: int, tariff_table):
             return price, thr
     return None, None
 
+def eta_working_days(from_country: str, to_country: str) -> Optional[str]:
+    """'База' ориентировочных сроков в РАБОЧИХ днях по маршрутам."""
+    fc = (from_country or "").title()
+    tc = (to_country or "").title()
+    if fc == "Украина" and tc == "Россия":
+        return "27–29"
+    if fc == "Украина" and tc == "Беларусь":
+        return "21–23"
+    if fc in {"Россия", "Беларусь"} and tc == "Украина":
+        return None  # требует подтверждения
+    return None  # неизвестный маршрут
+
 def compute_quote(d: Dict) -> Dict:
     fc = (d.get("from_country", "") or "").title()
     tc = (d.get("to_country", "") or "").title()
@@ -407,21 +419,15 @@ def compute_quote(d: Dict) -> Dict:
 
     price, thr = base_price(w, PRICING[urgency])
 
-    if fc == "Украина" and tc == "Россия":
-        eta = "27–29 дней"
-    elif fc == "Украина" and tc == "Беларусь":
-        eta = "21–23 дня"
-    elif fc in {"Россия", "Беларусь"} and tc == "Украина":
-        eta = "уточним при оформлении (ориентир: 21–29 дней)"
-    else:
-        eta = "требует подтверждения маршрута"
+    eta_work = eta_working_days(fc, tc)
 
     if w == 0 or price is None:
         return {
             "price_eur": None,
             "threshold_g": None,
-            "eta_text": eta,
+            "eta_working": eta_work,
             "notes": "вес 0 г или >100 г — стоимость по согласованию",
+            "urgency": urgency,
         }
 
     notes = "ускоренная доставка" if urgency == "срочная" else None
@@ -429,14 +435,14 @@ def compute_quote(d: Dict) -> Dict:
     return {
         "price_eur": price,
         "threshold_g": thr,
-        "eta_text": eta,
+        "eta_working": eta_work,   # строка вроде "27–29" или None
         "notes": notes,
+        "urgency": urgency,
     }
 
 # ------------ Уведомление админу (НЕ пользователю) ------------
 def notify_admin_lead(source_chat_id: int, payload: Dict):
-    """Отправляет карточку лида администратору. Пользователю НЕ показывается.
-       Если админ тестирует из того же чата, уведомление подавляется."""
+    """Отправляет карточку лида администратору. Пользователю НЕ показывается."""
     if not ADMIN_CHAT_ID:
         print("[ADMIN] ADMIN_CHAT_ID не задан — уведомление не отправлено")
         return
@@ -446,7 +452,11 @@ def notify_admin_lead(source_chat_id: int, payload: Dict):
     try:
         q = compute_quote(payload)
         price_line = f"Оценка: €{q['price_eur']} (до {q['threshold_g']} г)" if q["price_eur"] is not None else "Оценка: по согласованию"
-        eta_line = f"Срок: {q['eta_text']}"
+        # Для админа оставим старую детализацию по маршруту
+        eta_line = (
+            f"Срок: ориентировочно {q['eta_working']} рабочих дней" if q.get("eta_working")
+            else "Срок: требует подтверждения маршрута"
+        )
         note_line = f"Примечание: {q['notes']}" if q.get("notes") else None
         lines = [
             "🟢 *Новый лид (DocuBridge)*",
@@ -547,11 +557,10 @@ AI_KEYS = {"doc_type","from_country","from_city","to_country","to_city","pages_a
 URGENCY_SYNONYMS = {
     "срочная": [
         "срочно","срочная","экспресс","быстро","быстрее",
-        "как можно быстрее","urgent","express","ускоренная","максимально быстро"
+        "как можно быстро","как можно быстрее","urgent","express","ускоренная","ускоренный","максимально быстро"
     ],
     "обычная": [
-        "обычно","обычная","стандарт","нормально","не срочно","несрочно",
-        "без спешки","standard","normal"
+        "обычно","обычная","стандарт","стандартный","базовый","не быстрый","небыстро","normal","standard","без спешки"
     ],
 }
 
@@ -611,8 +620,8 @@ def normalize_country(x: Optional[str]) -> Optional[str]:
 def normalize_urgency(x: Optional[str]) -> Optional[str]:
     if not x: return None
     s = x.strip().lower()
-    if s in {"обычная","standard","normal"}: return "обычная"
-    if s in {"срочная","express","urgent","ускоренная"}: return "срочная"
+    if s in {"обычная","standard","normal","базовый","стандартный"}: return "обычная"
+    if s in {"срочная","express","urgent","ускоренная","ускоренный","экспресс"}: return "срочная"
     return None
 
 def ai_understand(text: str) -> Optional[Dict[str, Any]]:
@@ -736,6 +745,105 @@ def merge_ai_data(existing: Dict, parsed: Dict) -> Dict:
             pass
     return merged
 
+# --- АЛИАСЫ ПОЛЕЙ ДЛЯ КОМАНД «ИЗМЕНИ/ВЕРНИ К ...» ---
+FIELD_ALIASES = {
+    "doc_type":      ["тип документа", "документ", "вид документа"],
+    "from_country":  ["страна отправки", "страна откуда", "из страны", "страна-отправитель"],
+    "from_city":     ["город отправки", "город откуда", "из города"],
+    "to_country":    ["страна доставки", "страна назначения", "в страну", "страна-получатель"],
+    "to_city":       ["город доставки", "город назначения", "в город"],
+    "pages_a4":      ["страницы", "страниц", "листов", "листы", "количество страниц", "кол-во листов", "а4"],
+    "weight_grams":  ["вес", "масса", "грамм", "граммы"],
+    "urgency":       ["срочность", "скорость", "режим доставки"],
+    "name":          ["имя", "фамилия", "как обращаться"],
+    "phone":         ["телефон", "номер", "контакт"],
+    "email":         ["почта", "email", "e-mail", "электронная почта"],
+    "best_time":     ["время связи", "когда связаться", "лучшее время"],
+}
+
+def alias_to_key(text: str) -> Optional[str]:
+    s = (text or "").lower()
+    for key, aliases in FIELD_ALIASES.items():
+        for a in aliases:
+            if a in s:
+                return key
+    return None
+
+def try_extract_value_for_key(key: str, text: str) -> Optional[Any]:
+    s = (text or "").strip()
+
+    if key == "urgency":
+        syn = infer_urgency(s)
+        if syn:
+            return syn
+
+    if key in {"pages_a4", "weight_grams"}:
+        m = re.search(r"(\d+)", s.lower())
+        if m:
+            try:
+                val = int(m.group(1))
+                if key == "pages_a4" and val >= 0:
+                    return val
+                if key == "weight_grams" and val >= 0:
+                    return val
+            except:
+                pass
+        return None
+
+    if key in {"from_country", "to_country"}:
+        m = re.search(r"(?:из|в|во)\s+([A-Za-zА-Яа-яЁё\-]+)", s, flags=re.I)
+        cand = m.group(1) if m else s
+        return normalize_country(cand)
+
+    if key in {"from_city", "to_city"}:
+        m = re.search(r"(?:город|в|из)\s+([A-Za-zА-Яа-яЁё\-\s]{2,})", s, flags=re.I)
+        return (m.group(1).strip().title() if m else None)
+
+    if key == "phone":
+        m = re.search(r"(\+\d[\d\s\-]{6,})", s)
+        if m:
+            cand = m.group(1).replace(" ", "")
+            return cand if valid_phone(cand) else None
+
+    if key == "email":
+        m = re.search(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", s)
+        if m:
+            return m.group(1) if valid_email(m.group(1)) else None
+
+    if key == "name":
+        m = re.search(r"(?:меня зовут|мо[её] имя|я\s*[-—]\s*)(.+)", s, flags=re.I)
+        if m:
+            cand = m.group(1).strip()
+            return cand if valid_name(cand) else None
+
+    if key == "best_time":
+        m = re.search(r"(после|до|в)\s+[^,.!?]+", s, flags=re.I)
+        return m.group(0) if m else s
+
+    if key == "doc_type":
+        return s if len(s) >= 2 else None
+
+    return None
+
+def detect_jump_or_edit(text: str) -> Tuple[Optional[str], Optional[Any]]:
+    """
+    Возвращает (key, new_value):
+      - key: какой шаг запросили (на него прыгать)
+      - new_value: если в фразе есть новое значение — сразу применить
+    """
+    s = (text or "").lower()
+    if not s:
+        return (None, None)
+
+    if any(w in s for w in ["верни", "вернуть", "вернись", "исправ", "поправ", "измен", "поменя", "коррект"]):
+        key = alias_to_key(s)
+        if not key:
+            return (None, None)
+        new_val = try_extract_value_for_key(key, text)
+        return (key, new_val)
+
+    return (None, None)
+
 # ------------ UI / Диалог ------------
 def ask(chat_id: int, idx: int, data: Dict):
     field = FIELDS[idx]
@@ -768,6 +876,32 @@ def handle_answer(chat_id: int, text: str):
 
     state, data = get_state(chat_id)
     save_message(chat_id, text, None)
+
+    # 🔹 Команды "верни/исправь": переход на нужный шаг, опционально сразу применяем новое значение
+    jump_key, new_val = detect_jump_or_edit(text)
+    if jump_key:
+        data = (data or {})
+        if new_val is not None:
+            data[jump_key] = new_val
+            if jump_key == "pages_a4" and int(data.get("weight_grams") or 0) == 0:
+                try:
+                    pages = int(new_val)
+                    if pages > 0:
+                        data["weight_grams"] = pages * 6
+                except:
+                    pass
+            update_data(chat_id, data)
+            idx = first_missing_index(data)
+            if idx >= len(FIELDS):
+                return finalize_form(chat_id, data, last_user_text=text)
+        else:
+            idx = next((i for i,f in enumerate(FIELDS) if f["key"] == jump_key), 0)
+
+        data["_idx"] = idx
+        set_state(chat_id, "collecting", data)
+        bot.send_message(chat_id, "Ок, вернул к запрошенному шагу. Уточните, пожалуйста.", reply_markup=ReplyKeyboardRemove())
+        ask(chat_id, idx, data)
+        return
 
     # ВНЕ визарда: сначала эвристика, потом ИИ
     if state != "collecting":
@@ -824,13 +958,10 @@ def handle_answer(chat_id: int, text: str):
     elif t == "choice":
         norm_map = {str(c).lower(): c for c in field["choices"]}
         s_norm = s.lower()
-
-        # если это срочность — принимаем синонимы (быстро/экспресс/несрочно и т.п.)
         if key == "urgency":
             syn = infer_urgency(s)
             if syn:
                 s_norm = syn
-
         if s_norm in norm_map:
             val = norm_map[s_norm]
             print(f"[Handler] Choice accepted: '{s}' -> '{val}'")
@@ -917,7 +1048,17 @@ def finalize_form(chat_id: int, data: Dict, last_user_text: Optional[str] = None
         if quote["price_eur"] is not None else
         "Стоимость: по согласованию"
     )
-    eta_line = f"Срок доставки: {quote['eta_text']}"
+
+    # формирование строки срока в зависимости от срочности
+    if quote.get("urgency") == "срочная":
+        eta_line = "Срок доставки: ускоренная доставка"
+    else:
+        eta_line = (
+            f"Срок доставки: ориентировочно {quote['eta_working']} рабочих дней"
+            if quote.get("eta_working")
+            else "Срок доставки: требует подтверждения маршрута"
+        )
+
     notes_line = f"{quote['notes']}" if quote.get("notes") else None
 
     # Уведомляем только админа (не пользователя)
