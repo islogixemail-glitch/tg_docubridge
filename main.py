@@ -3,7 +3,7 @@ import re
 import json
 import traceback
 from typing import Optional, Dict, Tuple
-import threading # <-- ДОБАВЛЕНО: для фоновой обработки
+# import threading # <-- ДОБАВЛЕНО: для фоновой обработки
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -106,7 +106,7 @@ def ensure_tables():
         CREATE INDEX IF NOT EXISTS idx_processed_updates_time 
           ON processed_updates(processed_at);
         """)
-        conn.commit(); cur.close(); conn.close()
+        conn.commit(); cur.close()
         print("[DB] ensure_tables OK")
     except Exception as e:
         print(f"[DB] ensure_tables error: {e}")
@@ -127,7 +127,6 @@ def is_update_processed(update_id: int) -> bool:
         )
         exists = cur.fetchone() is not None
         cur.close()
-        conn.close()
         return exists
     except Exception as e:
         print(f"[DB] is_update_processed error: {e}")
@@ -149,7 +148,6 @@ def mark_update_processed(update_id: int):
         )
         conn.commit()
         cur.close()
-        conn.close()
     except Exception as e:
         print(f"[DB] mark_update_processed error: {e}")
     finally:
@@ -204,7 +202,7 @@ def get_state(chat_id: int) -> Tuple[str, Dict]:
         conn = get_conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT state,data FROM user_state WHERE chat_id=%s", (int(chat_id),))
-        row = cur.fetchone(); cur.close(); conn.close()
+        row = cur.fetchone(); cur.close()
         return (row["state"], row["data"] or {}) if row else ("greeting", {})
     except Exception as e:
         print(f"[DB] get_state error: {e}")
@@ -223,7 +221,7 @@ def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
           ON CONFLICT (chat_id) DO UPDATE
             SET state=EXCLUDED.state, data=COALESCE(EXCLUDED.data, user_state.data), updated_at=NOW()
         """, (int(chat_id), state, json.dumps(data or {})))
-        conn.commit(); cur.close(); conn.close()
+        conn.commit(); cur.close()
     except Exception as e:
         print(f"[DB] set_state error: {e}")
     finally:
@@ -231,13 +229,14 @@ def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
             return_conn(conn)  # Возвращаем в пул вместо close()
             
 def update_data(chat_id: int, new_data: Dict):
+    conn = None  # <-- ВАЖНО: объявляем до try
     try:
         if not DB_URL: return
         conn = get_conn(); cur = conn.cursor()
         cur.execute("""
           UPDATE user_state SET data=%s, updated_at=NOW() WHERE chat_id=%s
         """, (json.dumps(new_data), int(chat_id)))
-        conn.commit(); cur.close(); conn.close()
+        conn.commit(); cur.close()
     except Exception as e:
         print(f"[DB] update_data error: {e}")
     finally:
@@ -554,17 +553,18 @@ def telegram_webhook():
             json_data = json.loads(request.get_data().decode("utf-8"))
             update = Update.de_json(json_data)
             
-            # ЗАЩИТА ОТ ДУБЛЕЙ: проверяем update_id
             update_id = update.update_id
+            print(f"[Webhook] Received update_id: {update_id}")  # <-- ДОБАВИТЬ
+            
             if is_update_processed(update_id):
                 print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
                 return "OK", 200
             
-            # Отмечаем как обработанный ДО обработки (важно!)
             mark_update_processed(update_id)
+            print(f"[Webhook] Processing update_id: {update_id}")  # <-- ДОБАВИТЬ
             
-            # Теперь обрабатываем
             bot.process_new_updates([update])
+            print(f"[Webhook] Update {update_id} processed successfully")  # <-- ДОБАВИТЬ
         else:
             print("[Webhook] Unsupported content-type")
     except Exception as e:
@@ -575,14 +575,20 @@ def telegram_webhook():
 def ensure_webhook():
     try:
         if not WEBHOOK_BASE:
-            print("WARNING: WEBHOOK_BASE не задан — вебхук не выставлен")
-            return
+            print("❌ ERROR: WEBHOOK_BASE не задан — бот не будет работать!")
+            print("Установите WEBHOOK_BASE в .env файле")
+            raise SystemExit(1)  # Останавливаем запуск
         url=f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
         bot.remove_webhook()
         ok=bot.set_webhook(url=url, drop_pending_updates=True)
-        print(f"Webhook set to: {url}" if ok else "ERROR: set_webhook returned False")
+        if ok:
+            print(f"✅ Webhook set to: {url}")
+        else:
+            print("❌ ERROR: set_webhook returned False")
+            raise SystemExit(1)
     except Exception as e:
-        print(f"[Webhook] set error: {e}")
+        print(f"❌ [Webhook] set error: {e}")
+        raise SystemExit(1)
 
 # ------------ Entrypoint ------------
 init_db_pool()      # Создаем пул соединений
