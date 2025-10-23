@@ -42,7 +42,7 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 print(f"[OpenAI] client is {'ON' if client else 'OFF'}")
 
-# ------------ DB Connection Pool ------------
+# ------------ DB Connection Pool (ИСПРАВЛЕННАЯ ВЕРСИЯ) ------------
 connection_pool = None
 
 def init_db_pool():
@@ -52,30 +52,91 @@ def init_db_pool():
         return
     try:
         connection_pool = pool.SimpleConnectionPool(
-            minconn=1,      # минимум 1 соединение
-            maxconn=10,     # максимум 10 соединений
-            dsn=DB_URL
+            minconn=1,
+            maxconn=10,
+            dsn=DB_URL,
+            # ДОБАВИТЬ: параметры для борьбы с таймаутами Neon.tech
+            keepalives=1,              # включить TCP keepalive
+            keepalives_idle=30,        # проверять каждые 30 сек
+            keepalives_interval=10,    # интервал между проверками
+            keepalives_count=5         # сколько попыток
         )
         print("[DB] Connection pool created")
     except Exception as e:
         print(f"[DB] Pool creation error: {e}")
 
 def get_conn():
-    """Получает соединение из пула"""
-    if not connection_pool:
-        return psycopg2.connect(DB_URL) if DB_URL else None
-    return connection_pool.getconn()
+    """Получает соединение из пула с проверкой валидности"""
+    if not DB_URL:
+        return None
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if not connection_pool:
+                # Если пула нет, создаем прямое соединение
+                return psycopg2.connect(
+                    DB_URL,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5
+                )
+            
+            conn = connection_pool.getconn()
+            
+            # ПРОВЕРКА: соединение живое?
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                cur.close()
+                return conn  # Соединение рабочее
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as db_err:
+                # Соединение мертвое
+                print(f"[DB] Dead connection detected: {db_err}")
+                try:
+                    connection_pool.putconn(conn, close=True)
+                except:
+                    pass
+                if attempt < max_retries - 1:
+                    continue  # Пробуем еще раз
+                raise
+                
+        except Exception as e:
+            print(f"[DB] get_conn error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                # Последняя попытка - возвращаем None чтобы избежать зависания
+                print(f"[DB] All connection attempts failed")
+                return None
+    
+    return None
 
 def return_conn(conn):
     """Возвращает соединение в пул"""
-    if connection_pool and conn:
-        connection_pool.putconn(conn)
+    if not conn:
+        return
+    try:
+        if connection_pool:
+            connection_pool.putconn(conn)
+        else:
+            conn.close()
+    except Exception as e:
+        print(f"[DB] return_conn error: {e}")
+        try:
+            conn.close()
+        except:
+            pass
 
 def ensure_tables():
+    conn = None  # <-- ДОБАВИТЬ: объявить ДО try
     if not DB_URL:
         return
     try:
         conn = get_conn()
+        if not conn:
+            print("[DB] ensure_tables: Failed to get connection")
+            return
+        
         cur = conn.cursor()
         cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_history (
@@ -97,29 +158,32 @@ def ensure_tables():
           payload JSONB NOT NULL,
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
-        -- НОВАЯ ТАБЛИЦА для защиты от дублей:
         CREATE TABLE IF NOT EXISTS processed_updates (
           update_id BIGINT PRIMARY KEY,
           processed_at TIMESTAMPTZ DEFAULT NOW()
         );
-        -- Индекс для автоочистки старых записей (старше 7 дней)
         CREATE INDEX IF NOT EXISTS idx_processed_updates_time 
           ON processed_updates(processed_at);
         """)
-        conn.commit(); cur.close()
+        conn.commit()
+        cur.close()
         print("[DB] ensure_tables OK")
     except Exception as e:
         print(f"[DB] ensure_tables error: {e}")
     finally:
         if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()
+            return_conn(conn)
 
 def is_update_processed(update_id: int) -> bool:
-    conn = None  # <-- ДОБАВИТЬ эту строку
+    """Проверяет, было ли обновление уже обработано"""
+    conn = None  # <-- ДОБАВИТЬ: объявить ДО try
     if not DB_URL:
         return False
     try:
         conn = get_conn()
+        if not conn:
+            return False
+        
         cur = conn.cursor()
         cur.execute(
             "SELECT 1 FROM processed_updates WHERE update_id = %s", 
@@ -134,32 +198,18 @@ def is_update_processed(update_id: int) -> bool:
     finally:
         if conn:
             return_conn(conn)
-    """Проверяет, было ли обновление уже обработано"""
-    if not DB_URL:
-        return False  # Без БД не можем проверить
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM processed_updates WHERE update_id = %s", 
-            (update_id,)
-        )
-        exists = cur.fetchone() is not None
-        cur.close()
-        return exists
-    except Exception as e:
-        print(f"[DB] is_update_processed error: {e}")
-        return False  # В случае ошибки пропускаем проверку
-    finally:
-        if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()
-            
+
 def mark_update_processed(update_id: int):
     """Отмечает обновление как обработанное"""
+    conn = None  # <-- ДОБАВИТЬ: объявить ДО try
     if not DB_URL:
         return
     try:
         conn = get_conn()
+        if not conn:
+            print("[DB] mark_update_processed: Failed to get connection")
+            return
+        
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO processed_updates (update_id) VALUES (%s) ON CONFLICT DO NOTHING",
@@ -171,15 +221,19 @@ def mark_update_processed(update_id: int):
         print(f"[DB] mark_update_processed error: {e}")
     finally:
         if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()
+            return_conn(conn)
 
 def cleanup_old_updates():
     """Удаляет записи старше 7 дней из processed_updates"""
+    conn = None  # <-- УЖЕ есть, хорошо
     if not DB_URL:
         return
-    conn = None
     try:
         conn = get_conn()
+        if not conn:
+            print("[DB] cleanup_old_updates: Failed to get connection")
+            return
+        
         cur = conn.cursor()
         cur.execute("""
             DELETE FROM processed_updates 
@@ -194,12 +248,16 @@ def cleanup_old_updates():
     finally:
         if conn:
             return_conn(conn)
-            
+
 def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str]):
-    conn = None
+    conn = None  # <-- УЖЕ есть, хорошо
     try:
         if DB_URL:
             conn = get_conn()
+            if not conn:
+                print("[DB] save_message: Failed to get connection")
+                return
+            
             cur = conn.cursor()
             cur.execute("""INSERT INTO chat_history(chat_id,user_message,bot_reply)
                            VALUES(%s,%s,%s)""", (int(chat_id), user_text, bot_reply))
@@ -209,60 +267,78 @@ def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str
         print(f"[DB] save_message error: {e}")
     finally:
         if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()
-    
-    # УДАЛИЛИ блок с отправкой уведомлений админу!
-    # Уведомления будут только при завершении визарда (в notify_admin_lead)
+            return_conn(conn)
 
 def get_state(chat_id: int) -> Tuple[str, Dict]:
-    conn = None
+    conn = None  # <-- УЖЕ есть, хорошо
     try:
         if not DB_URL:
             return ("greeting", {})
+        
         conn = get_conn()
+        if not conn:
+            return ("greeting", {})
+        
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT state,data FROM user_state WHERE chat_id=%s", (int(chat_id),))
-        row = cur.fetchone(); cur.close()
+        row = cur.fetchone()
+        cur.close()
         return (row["state"], row["data"] or {}) if row else ("greeting", {})
     except Exception as e:
         print(f"[DB] get_state error: {e}")
         return ("greeting", {})
     finally:
         if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()    
+            return_conn(conn)
 
 def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
-    conn = None
+    conn = None  # <-- УЖЕ есть, хорошо
     try:
-        if not DB_URL: return
-        conn = get_conn(); cur = conn.cursor()
+        if not DB_URL:
+            return
+        
+        conn = get_conn()
+        if not conn:
+            print("[DB] set_state: Failed to get connection")
+            return
+        
+        cur = conn.cursor()
         cur.execute("""
           INSERT INTO user_state (chat_id,state,data,updated_at)
           VALUES (%s,%s,%s,NOW())
           ON CONFLICT (chat_id) DO UPDATE
             SET state=EXCLUDED.state, data=COALESCE(EXCLUDED.data, user_state.data), updated_at=NOW()
         """, (int(chat_id), state, json.dumps(data or {})))
-        conn.commit(); cur.close()
+        conn.commit()
+        cur.close()
     except Exception as e:
         print(f"[DB] set_state error: {e}")
     finally:
         if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()
-            
+            return_conn(conn)
+
 def update_data(chat_id: int, new_data: Dict):
-    conn = None  # <-- ВАЖНО: объявляем до try
+    conn = None  # <-- УЖЕ есть, хорошо
     try:
-        if not DB_URL: return
-        conn = get_conn(); cur = conn.cursor()
+        if not DB_URL:
+            return
+        
+        conn = get_conn()
+        if not conn:
+            print("[DB] update_data: Failed to get connection")
+            return
+        
+        cur = conn.cursor()
         cur.execute("""
           UPDATE user_state SET data=%s, updated_at=NOW() WHERE chat_id=%s
         """, (json.dumps(new_data), int(chat_id)))
-        conn.commit(); cur.close()
+        conn.commit()
+        cur.close()
     except Exception as e:
         print(f"[DB] update_data error: {e}")
     finally:
         if conn:
-            return_conn(conn)  # Возвращаем в пул вместо close()
+            return_conn(conn)
             
 # ------------ OpenAI (только вне визарда) ------------
 def ai_reply(text: str) -> str:
