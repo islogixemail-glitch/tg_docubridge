@@ -2,7 +2,7 @@ import os
 import re
 import json
 import traceback
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Any
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -539,6 +539,166 @@ def valid_name(s: str) -> bool:
     s = s.strip()
     return bool(re.match(r"^[A-Za-zА-Яа-яЁё\-'\s]{2,}$", s))
 
+# ------------ ИИ: распознавание намерений/данных из свободного текста ------------
+AI_KEYS = {"doc_type","from_country","from_city","to_country","to_city","pages_a4","weight_grams","urgency","name","phone","email","best_time"}
+
+def normalize_country(x: Optional[str]) -> Optional[str]:
+    if not x: return None
+    s = x.strip().lower()
+    mapping = {
+        "украина":"Украина","ukraine":"Украина","ua":"Украина",
+        "россия":"Россия","rf":"Россия","ru":"Россия","russia":"Россия",
+        "беларусь":"Беларусь","рб":"Беларусь","by":"Беларусь","belarus":"Беларусь",
+    }
+    return mapping.get(s, x.strip().title())
+
+def normalize_urgency(x: Optional[str]) -> Optional[str]:
+    if not x: return None
+    s = x.strip().lower()
+    if s in {"обычная","standard","normal"}: return "обычная"
+    if s in {"срочная","express","urgent","ускоренная"}: return "срочная"
+    return None
+
+def ai_understand(text: str) -> Optional[Dict[str, Any]]:
+    """Пытается извлечь JSON с полями анкеты из свободного текста пользователя."""
+    if not client:
+        return None
+    try:
+        system = (
+            "Ты логистический ассистент DocuBridge. "
+            "Тебе дают свободный текст. Твоя задача — извлечь структурированные поля заявки "
+            "(doc_type, from_country, from_city, to_country, to_city, pages_a4, weight_grams, urgency, name, phone, email, best_time). "
+            "Возвращай ТОЛЬКО валидный JSON-объект без комментариев и лишнего текста. "
+            "Если поле неизвестно, просто не включай его."
+        )
+        user = (
+            "Текст пользователя:\n" + text + "\n\n"
+            "Требуемый формат JSON (пример):\n"
+            "{\n"
+            '  "doc_type": "доверенность",\n'
+            '  "from_country": "Украина", "from_city": "Киев",\n'
+            '  "to_country": "Россия", "to_city": "Москва",\n'
+            '  "pages_a4": 3, "weight_grams": 18,\n'
+            '  "urgency": "обычная",\n'
+            '  "name": "Иван Иванов", "phone": "+380...", "email": "name@example.com",\n'
+            '  "best_time": "после 15:00"\n'
+            "}\n"
+        )
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":system},{"role":"user","content":user}],
+            temperature=0.2,
+            max_tokens=400,
+            timeout=30
+        )
+        raw = (r.choices[0].message.content or "").strip()
+        # вытащим первый JSON-объект
+        m = re.search(r"\{.*\}", raw, flags=re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        if not isinstance(data, dict):
+            return None
+
+        # приведём ключи и значения к норме
+        cleaned: Dict[str, Any] = {}
+        for k, v in data.items():
+            if k not in AI_KEYS:  # неизвестные — игнор
+                continue
+            if v is None:
+                continue
+            if k in {"pages_a4","weight_grams"}:
+                try:
+                    iv = int(v)
+                    if iv >= 0:
+                        cleaned[k] = iv
+                except Exception:
+                    pass
+            elif k in {"from_country","to_country"}:
+                nv = normalize_country(str(v))
+                if nv:
+                    cleaned[k] = nv
+            elif k == "urgency":
+                nu = normalize_urgency(str(v))
+                if nu:
+                    cleaned[k] = nu
+            else:
+                sv = str(v).strip()
+                if sv:
+                    cleaned[k] = sv
+
+        # базовая валидация контактов
+        if "phone" in cleaned and not valid_phone(cleaned["phone"]):
+            cleaned.pop("phone", None)
+        if "email" in cleaned and not valid_email(cleaned["email"]):
+            cleaned.pop("email", None)
+        if "name" in cleaned and not valid_name(cleaned["name"]):
+            cleaned.pop("name", None)
+
+        # если указаны страницы, а веса нет — оценим вес
+        if "pages_a4" in cleaned and ("weight_grams" not in cleaned or cleaned.get("weight_grams",0) == 0):
+            pages = int(cleaned["pages_a4"] or 0)
+            if pages > 0:
+                cleaned["weight_grams"] = pages * 6
+
+        return cleaned if cleaned else None
+    except Exception as e:
+        print(f"[OpenAI] ai_understand error: {e}")
+        return None
+
+def first_missing_index(data: Dict) -> int:
+    """Возвращает индекс первого незаполненного поля по FIELDS; если всё заполнено — len(FIELDS)."""
+    def is_filled(field, value) -> bool:
+        t = field["type"]
+        if value is None:
+            return False
+        s = str(value).strip() if not isinstance(value, int) else value
+        if t == "text":
+            return bool(s) and len(str(s)) >= 1
+        if t == "choice":
+            return str(value).strip() in field["choices"]
+        if t == "int":
+            try:
+                return int(value) > 0
+            except Exception:
+                return False
+        if t == "int_opt":
+            try:
+                iv = int(value)
+                return iv >= 0
+            except Exception:
+                return False
+        if t == "phone":
+            return valid_phone(str(value))
+        if t == "email":
+            return valid_email(str(value))
+        if t == "name":
+            return valid_name(str(value))
+        return False
+
+    for i, f in enumerate(FIELDS):
+        k = f["key"]
+        if not is_filled(f, data.get(k)):
+            return i
+    return len(FIELDS)
+
+def merge_ai_data(existing: Dict, parsed: Dict) -> Dict:
+    """Мержит распознанные ИИ поля в data, не стирая уже заполненные значения."""
+    merged = dict(existing or {})
+    for k in AI_KEYS:
+        if k in parsed and (merged.get(k) in (None, "", 0) or k not in merged):
+            merged[k] = parsed[k]
+    # автоподстановка веса по страницам
+    if merged.get("pages_a4") and not merged.get("weight_grams"):
+        try:
+            pages = int(merged["pages_a4"])
+            if pages > 0:
+                merged["weight_grams"] = pages * 6
+        except Exception:
+            pass
+    return merged
+
+# ------------ UI / диалог ------------
 def ask(chat_id: int, idx: int, data: Dict):
     """Задает вопрос по шагу анкеты"""
     field = FIELDS[idx]
@@ -575,12 +735,32 @@ def handle_answer(chat_id: int, text: str):
     # Логируем ВСЕ входящие сообщения пользователя
     save_message(chat_id, text, None)
 
+    # --- AI-вход: если мы НЕ в режиме сбора, попробуем понять намерение и автозаполнить анкету ---
     if state != "collecting":
+        parsed = ai_understand(text)
+        if parsed:
+            print(f"[AI] Parsed intent: {parsed}")
+            # стартуем сбор с авто-заполнением
+            data = merge_ai_data({}, parsed)
+            idx = first_missing_index(data)
+            if idx >= len(FIELDS):
+                # всё заполнено → финалим сразу
+                return finalize_form(chat_id, data, last_user_text=text)
+            else:
+                data["_idx"] = idx
+                set_state(chat_id, "collecting", data)
+                # уберём старую клавиатуру, если была
+                bot.send_message(chat_id, "Понял вас. Давайте уточним пару моментов.", reply_markup=ReplyKeyboardRemove())
+                ask(chat_id, idx, data)
+                return
+
+        # если понять не удалось — обычный «умный» ответ вне визарда
         reply = ai_reply(text)
         save_message(chat_id, text, reply)
         bot.send_message(chat_id, reply, reply_markup=main_menu())
         return
 
+    # --- Обычная логика визарда (мы уже в state == collecting) ---
     data = data or {}
     idx = int(data.get("_idx", 0))
     if idx < 0 or idx >= len(FIELDS):
@@ -665,7 +845,12 @@ def handle_answer(chat_id: int, text: str):
         ask(chat_id, idx, data)
         return
 
-    # Анкета завершена
+    # Анкета завершена → финализируем
+    finalize_form(chat_id, data, last_user_text=text)
+
+def finalize_form(chat_id: int, data: Dict, last_user_text: Optional[str] = None):
+    """Сохранение лида, уведомление, подсчёт цены, финальный ответ."""
+    # лид
     conn = None
     try:
         if DB_URL:
@@ -686,6 +871,7 @@ def handle_answer(chat_id: int, text: str):
         if conn:
             return_conn(conn)
 
+    # квота
     quote = compute_quote(data)
     price_line = (
         f"Стоимость: €{quote['price_eur']} (до {quote['threshold_g']} г)"
@@ -695,8 +881,10 @@ def handle_answer(chat_id: int, text: str):
     eta_line = f"Срок доставки: {quote['eta_text']}"
     notes_line = f"{quote['notes']}" if quote.get("notes") else None
 
+    # уведомление администратора
     notify_admin_lead(chat_id, data)
 
+    # ответ пользователю
     reply = (
         "✅ Спасибо! Все данные получены.\n"
         f"Маршрут: {data.get('from_city')}, {data.get('from_country')} → "
@@ -707,8 +895,7 @@ def handle_answer(chat_id: int, text: str):
         f"Связаться: {data.get('name')}, {data.get('phone')}, {data.get('email')} ({data.get('best_time')})\n\n"
         "Если всё верно — просто ожидайте ответ нашего специалиста. Если нужно что-то изменить — пройдите опрос снова."
     )
-
-    save_message(chat_id, None, reply)
+    save_message(chat_id, last_user_text or "", reply)
     bot.send_message(chat_id, reply, reply_markup=main_menu())
     set_state(chat_id, "completed")
 
@@ -724,7 +911,8 @@ def main_menu():
 def start(message):
     msg = (
         "Добро пожаловать в IS-Logix DocuBridge! 🇸🇰📄\n"
-        "Нажмите /consult чтобы начать расчёт и оформление заявки."
+        "Нажмите /consult чтобы начать расчёт и оформление заявки.\n"
+        "Либо опишите задачу свободным текстом — я постараюсь понять и заполнить анкету автоматически."
     )
     save_message(message.chat.id, "/start", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
