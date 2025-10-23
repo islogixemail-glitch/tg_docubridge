@@ -3,7 +3,6 @@ import re
 import json
 import traceback
 from typing import Optional, Dict, Tuple
-# import threading # <-- ДОБАВЛЕНО: для фоновой обработки
 
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -12,7 +11,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, Update
+from telebot.types import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    Update,
+)
 
 import psycopg2
 import psycopg2.extras
@@ -42,7 +46,7 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 print(f"[OpenAI] client is {'ON' if client else 'OFF'}")
 
-# ------------ DB Connection Pool (ИСПРАВЛЕННАЯ ВЕРСИЯ) ------------
+# ------------ DB Connection Pool ------------
 connection_pool = None
 
 def init_db_pool():
@@ -55,11 +59,10 @@ def init_db_pool():
             minconn=1,
             maxconn=10,
             dsn=DB_URL,
-            # ДОБАВИТЬ: параметры для борьбы с таймаутами Neon.tech
-            keepalives=1,              # включить TCP keepalive
-            keepalives_idle=30,        # проверять каждые 30 сек
-            keepalives_interval=10,    # интервал между проверками
-            keepalives_count=5         # сколько попыток
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
         )
         print("[DB] Connection pool created")
     except Exception as e:
@@ -69,46 +72,39 @@ def get_conn():
     """Получает соединение из пула с проверкой валидности"""
     if not DB_URL:
         return None
-    
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
             if not connection_pool:
-                # Если пула нет, создаем прямое соединение
                 return psycopg2.connect(
                     DB_URL,
                     keepalives=1,
                     keepalives_idle=30,
                     keepalives_interval=10,
-                    keepalives_count=5
+                    keepalives_count=5,
                 )
-            
+
             conn = connection_pool.getconn()
-            
-            # ПРОВЕРКА: соединение живое?
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT 1")
                 cur.close()
-                return conn  # Соединение рабочее
+                return conn
             except (psycopg2.OperationalError, psycopg2.InterfaceError) as db_err:
-                # Соединение мертвое
                 print(f"[DB] Dead connection detected: {db_err}")
                 try:
                     connection_pool.putconn(conn, close=True)
-                except:
+                except Exception:
                     pass
                 if attempt < max_retries - 1:
-                    continue  # Пробуем еще раз
+                    continue
                 raise
-                
         except Exception as e:
             print(f"[DB] get_conn error (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
-                # Последняя попытка - возвращаем None чтобы избежать зависания
-                print(f"[DB] All connection attempts failed")
+                print("[DB] All connection attempts failed")
                 return None
-    
     return None
 
 def return_conn(conn):
@@ -124,11 +120,12 @@ def return_conn(conn):
         print(f"[DB] return_conn error: {e}")
         try:
             conn.close()
-        except:
+        except Exception:
             pass
 
 def ensure_tables():
-    conn = None  # <-- ДОБАВИТЬ: объявить ДО try
+    """Создаёт нужные таблицы (если их нет)"""
+    conn = None
     if not DB_URL:
         return
     try:
@@ -136,35 +133,44 @@ def ensure_tables():
         if not conn:
             print("[DB] ensure_tables: Failed to get connection")
             return
-        
+
         cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS chat_history (
-          id BIGSERIAL PRIMARY KEY,
-          chat_id BIGINT NOT NULL,
-          user_message TEXT,
-          bot_reply TEXT,
-          timestamp TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS user_state (
-          chat_id BIGINT PRIMARY KEY,
-          state TEXT NOT NULL DEFAULT 'greeting',
-          data JSONB DEFAULT '{}'::jsonb,
-          updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS leads (
-          id BIGSERIAL PRIMARY KEY,
-          chat_id BIGINT NOT NULL,
-          payload JSONB NOT NULL,
-          created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS processed_updates (
-          update_id BIGINT PRIMARY KEY,
-          processed_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_processed_updates_time 
-          ON processed_updates(processed_at);
-        """)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_history (
+              id BIGSERIAL PRIMARY KEY,
+              chat_id BIGINT NOT NULL,
+              user_message TEXT,
+              bot_reply TEXT,
+              timestamp TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS user_state (
+              chat_id BIGINT PRIMARY KEY,
+              state TEXT NOT NULL DEFAULT 'greeting',
+              data JSONB DEFAULT '{}'::jsonb,
+              updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS leads (
+              id BIGSERIAL PRIMARY KEY,
+              chat_id BIGINT NOT NULL,
+              payload JSONB NOT NULL,
+              created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS processed_updates (
+              update_id BIGINT PRIMARY KEY,
+              processed_at TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_processed_updates_time
+              ON processed_updates (processed_at);
+
+            CREATE INDEX IF NOT EXISTS chat_history_ts_idx
+              ON chat_history (timestamp DESC);
+            """
+        )
         conn.commit()
         cur.close()
         print("[DB] ensure_tables OK")
@@ -176,18 +182,18 @@ def ensure_tables():
 
 def is_update_processed(update_id: int) -> bool:
     """Проверяет, было ли обновление уже обработано"""
-    conn = None  # <-- ДОБАВИТЬ: объявить ДО try
+    conn = None
     if not DB_URL:
         return False
     try:
         conn = get_conn()
         if not conn:
             return False
-        
+
         cur = conn.cursor()
         cur.execute(
-            "SELECT 1 FROM processed_updates WHERE update_id = %s", 
-            (update_id,)
+            "SELECT 1 FROM processed_updates WHERE update_id = %s",
+            (update_id,),
         )
         exists = cur.fetchone() is not None
         cur.close()
@@ -201,7 +207,7 @@ def is_update_processed(update_id: int) -> bool:
 
 def mark_update_processed(update_id: int):
     """Отмечает обновление как обработанное"""
-    conn = None  # <-- ДОБАВИТЬ: объявить ДО try
+    conn = None
     if not DB_URL:
         return
     try:
@@ -209,11 +215,11 @@ def mark_update_processed(update_id: int):
         if not conn:
             print("[DB] mark_update_processed: Failed to get connection")
             return
-        
+
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO processed_updates (update_id) VALUES (%s) ON CONFLICT DO NOTHING",
-            (update_id,)
+            (update_id,),
         )
         conn.commit()
         cur.close()
@@ -225,7 +231,7 @@ def mark_update_processed(update_id: int):
 
 def cleanup_old_updates():
     """Удаляет записи старше 7 дней из processed_updates"""
-    conn = None  # <-- УЖЕ есть, хорошо
+    conn = None
     if not DB_URL:
         return
     try:
@@ -233,12 +239,14 @@ def cleanup_old_updates():
         if not conn:
             print("[DB] cleanup_old_updates: Failed to get connection")
             return
-        
+
         cur = conn.cursor()
-        cur.execute("""
-            DELETE FROM processed_updates 
+        cur.execute(
+            """
+            DELETE FROM processed_updates
             WHERE processed_at < NOW() - INTERVAL '7 days'
-        """)
+            """
+        )
         deleted = cur.rowcount
         conn.commit()
         cur.close()
@@ -250,17 +258,22 @@ def cleanup_old_updates():
             return_conn(conn)
 
 def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str]):
-    conn = None  # <-- УЖЕ есть, хорошо
+    """Сохраняет сообщение пользователя/бота в историю"""
+    conn = None
     try:
         if DB_URL:
             conn = get_conn()
             if not conn:
                 print("[DB] save_message: Failed to get connection")
                 return
-            
             cur = conn.cursor()
-            cur.execute("""INSERT INTO chat_history(chat_id,user_message,bot_reply)
-                           VALUES(%s,%s,%s)""", (int(chat_id), user_text, bot_reply))
+            cur.execute(
+                """
+                INSERT INTO chat_history (chat_id, user_message, bot_reply)
+                VALUES (%s, %s, %s)
+                """,
+                (int(chat_id), user_text, bot_reply),
+            )
             conn.commit()
             cur.close()
     except Exception as e:
@@ -270,17 +283,17 @@ def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str
             return_conn(conn)
 
 def get_state(chat_id: int) -> Tuple[str, Dict]:
-    conn = None  # <-- УЖЕ есть, хорошо
+    conn = None
     try:
         if not DB_URL:
             return ("greeting", {})
-        
+
         conn = get_conn()
         if not conn:
             return ("greeting", {})
-        
+
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT state,data FROM user_state WHERE chat_id=%s", (int(chat_id),))
+        cur.execute("SELECT state, data FROM user_state WHERE chat_id = %s", (int(chat_id),))
         row = cur.fetchone()
         cur.close()
         return (row["state"], row["data"] or {}) if row else ("greeting", {})
@@ -291,24 +304,29 @@ def get_state(chat_id: int) -> Tuple[str, Dict]:
         if conn:
             return_conn(conn)
 
-def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
-    conn = None  # <-- УЖЕ есть, хорошо
+def set_state(chat_id: int, state: str, data: Optional[Dict] = None):
+    conn = None
     try:
         if not DB_URL:
             return
-        
+
         conn = get_conn()
         if not conn:
             print("[DB] set_state: Failed to get connection")
             return
-        
+
         cur = conn.cursor()
-        cur.execute("""
-          INSERT INTO user_state (chat_id,state,data,updated_at)
-          VALUES (%s,%s,%s,NOW())
-          ON CONFLICT (chat_id) DO UPDATE
-            SET state=EXCLUDED.state, data=COALESCE(EXCLUDED.data, user_state.data), updated_at=NOW()
-        """, (int(chat_id), state, json.dumps(data or {})))
+        cur.execute(
+            """
+            INSERT INTO user_state (chat_id, state, data, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (chat_id) DO UPDATE
+              SET state = EXCLUDED.state,
+                  data  = COALESCE(EXCLUDED.data, user_state.data),
+                  updated_at = NOW()
+            """,
+            (int(chat_id), state, json.dumps(data or {})),
+        )
         conn.commit()
         cur.close()
     except Exception as e:
@@ -318,20 +336,25 @@ def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
             return_conn(conn)
 
 def update_data(chat_id: int, new_data: Dict):
-    conn = None  # <-- УЖЕ есть, хорошо
+    conn = None
     try:
         if not DB_URL:
             return
-        
+
         conn = get_conn()
         if not conn:
             print("[DB] update_data: Failed to get connection")
             return
-        
+
         cur = conn.cursor()
-        cur.execute("""
-          UPDATE user_state SET data=%s, updated_at=NOW() WHERE chat_id=%s
-        """, (json.dumps(new_data), int(chat_id)))
+        cur.execute(
+            """
+            UPDATE user_state
+               SET data = %s, updated_at = NOW()
+             WHERE chat_id = %s
+            """,
+            (json.dumps(new_data), int(chat_id)),
+        )
         conn.commit()
         cur.close()
     except Exception as e:
@@ -339,7 +362,7 @@ def update_data(chat_id: int, new_data: Dict):
     finally:
         if conn:
             return_conn(conn)
-            
+
 # ------------ OpenAI (только вне визарда) ------------
 def ai_reply(text: str) -> str:
     if not client:
@@ -348,10 +371,12 @@ def ai_reply(text: str) -> str:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role":"system","content":"Ты вежливый логист-ассистент DocuBridge. Отвечай по делу и кратко, на русском."},
-                {"role":"user","content":text}
+                {"role": "system", "content": "Ты вежливый логист-ассистент DocuBridge. Отвечай по делу и кратко, на русском."},
+                {"role": "user", "content": text},
             ],
-            temperature=0.6, max_tokens=500, timeout=30
+            temperature=0.6,
+            max_tokens=500,
+            timeout=30,
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
@@ -359,132 +384,175 @@ def ai_reply(text: str) -> str:
         return "Небольшая пауза на стороне ИИ. Попробуйте ещё раз."
 
 # ------------ Тариф/ETA ------------
-TARIFF_TABLE = [(50,60),(100,65),(500,85)]  # € по весовым порогам
-def base_price(weight:int):
-    for thr,price in TARIFF_TABLE:
-        if weight<=thr: return price,thr
-    return None,None
+TARIFF_TABLE = [(50, 60), (100, 65), (500, 85)]  # € по весовым порогам
 
-def compute_quote(d:Dict)->Dict:
-    fc=(d.get("from_country","").title())
-    tc=(d.get("to_country","").title())
-    w=int(d.get("weight_grams") or 0)
-    price,thr = base_price(w)
-    if fc=="Украина" and tc=="Россия": eta="27–29 дней"
-    elif fc=="Украина" and tc=="Беларусь": eta="21–23 дня"
-    elif fc in {"Россия","Беларусь"} and tc=="Украина": eta="уточним при оформлении (ориентир: 21–29 дней)"
-    else: eta="требует подтверждения маршрута"
-    notes=None
-    if fc in {"Россия","Беларусь"} and tc=="Украина" and thr==50:
-        price=50; notes="спец-тариф для РФ/РБ → UA (до 50 г)"
+def base_price(weight: int):
+    for thr, price in TARIFF_TABLE:
+        if weight <= thr:
+            return price, thr
+    return None, None
+
+def compute_quote(d: Dict) -> Dict:
+    fc = (d.get("from_country", "").title())
+    tc = (d.get("to_country", "").title())
+    w = int(d.get("weight_grams") or 0)
+    price, thr = base_price(w)
+
+    if fc == "Украина" and tc == "Россия":
+        eta = "27–29 дней"
+    elif fc == "Украина" and tc == "Беларусь":
+        eta = "21–23 дня"
+    elif fc in {"Россия", "Беларусь"} and tc == "Украина":
+        eta = "уточним при оформлении (ориентир: 21–29 дней)"
+    else:
+        eta = "требует подтверждения маршрута"
+
+    notes = None
+    if fc in {"Россия", "Беларусь"} and tc == "Украина" and thr == 50:
+        price = 50
+        notes = "спец-тариф для РФ/РБ → UA (до 50 г)"
+
     if price is None:
-        return {"price_eur":None,"threshold_g":None,"eta_text":eta,"notes":"вес >500 г — по согласованию"}
-    return {"price_eur":price,"threshold_g":thr,"eta_text":eta,"notes":notes}
+        return {"price_eur": None, "threshold_g": None, "eta_text": eta, "notes": "вес >500 г — по согласованию"}
 
-def notify_admin_lead(chat_id:int, payload:Dict):
-    if not ADMIN_CHAT_ID: return
+    return {"price_eur": price, "threshold_g": thr, "eta_text": eta, "notes": notes}
+
+def notify_admin_lead(chat_id: int, payload: Dict):
+    if not ADMIN_CHAT_ID:
+        return
     try:
-        q=compute_quote(payload)
+        q = compute_quote(payload)
         price_line = f"Оценка: €{q['price_eur']} (до {q['threshold_g']} г)" if q["price_eur"] is not None else "Оценка: по согласованию (>500 г)"
         eta_line = f"Срок: {q['eta_text']}"
         note_line = f"Примечание: {q['notes']}" if q.get("notes") else None
-        lines=[
+        lines = [
             "🟢 *Новый лид (DocuBridge)*",
-            f"Chat ID: `{chat_id}`","",
-            f"Тип документа: {payload.get('doc_type','—')}",
+            f"Chat ID: `{chat_id}`",
+            "",
+            f"Тип документа: {payload.get('doc_type', '—')}",
             f"Маршрут: {payload.get('from_country')}/{payload.get('from_city')} → {payload.get('to_country')}/{payload.get('to_city')}",
-            f"Листов A4: {payload.get('pages_a4',0)}, вес ≈ {payload.get('weight_grams',0)} г",
-            f"Срочность: {payload.get('urgency','—')}",
-            "", f"Имя: {payload.get('name','—')}",
-            f"Телефон: {payload.get('phone','—')}",
-            f"Email: {payload.get('email','—')}",
-            f"Лучшее время связи: {payload.get('best_time','—')}",
-            "", price_line, eta_line
+            f"Листов A4: {payload.get('pages_a4', 0)}, вес ≈ {payload.get('weight_grams', 0)} г",
+            f"Срочность: {payload.get('urgency', '—')}",
+            "",
+            f"Имя: {payload.get('name', '—')}",
+            f"Телефон: {payload.get('phone', '—')}",
+            f"Email: {payload.get('email', '—')}",
+            f"Лучшее время связи: {payload.get('best_time', '—')}",
+            "",
+            price_line,
+            eta_line,
         ]
-        if note_line: lines.append(note_line)
+        if note_line:
+            lines.append(note_line)
         bot.send_message(ADMIN_CHAT_ID, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         print(f"[ADMIN notify] lead notify error: {e}")
 
 # ------------ Визард (детерминистичный) ------------
-COUNTRY_CHOICES = ["Украина","Россия","Беларусь"]
+COUNTRY_CHOICES = ["Украина", "Россия", "Беларусь"]
 
 FIELDS = [
-    {"key":"doc_type","type":"text","q":"Какой тип документа? (например: доверенность, диплом, свидетельство)"},
-    {"key":"from_country","type":"choice","choices":COUNTRY_CHOICES,"q":"Из какой страны отправляем? (Украина/Россия/Беларусь)"},
-    {"key":"from_city","type":"text","q":"Из какого города отправляем?"},
-    {"key":"to_country","type":"choice","choices":COUNTRY_CHOICES,"q":"В какую страну доставляем? (Украина/Россия/Беларусь)"},
-    {"key":"to_city","type":"text","q":"В какой город доставляем?"},
-    {"key":"pages_a4","type":"int","q":"Сколько листов A4? (число)"},
-    {"key":"weight_grams","type":"int_opt","q":"Если знаете точный вес в граммах — укажите, иначе напишите «нет»"},
-    {"key":"urgency","type":"choice","choices":["обычная","срочная"],"q":"Срочность: обычная или срочная?"},
-    {"key":"name","type":"name","q":"Как к вам обращаться (имя/фамилия)?"},
-    {"key":"phone","type":"phone","q":"Контактный телефон (+380 / +7 / +375):"},
-    {"key":"email","type":"email","q":"Электронная почта:"},
-    {"key":"best_time","type":"text","q":"Когда вам удобнее принимать звонок/сообщение?"}
+    {"key": "doc_type", "type": "text", "q": "Какой тип документа? (например: доверенность, диплом, свидетельство)"},
+    {"key": "from_country", "type": "choice", "choices": COUNTRY_CHOICES, "q": "Из какой страны отправляем? (Украина/Россия/Беларусь)"},
+    {"key": "from_city", "type": "text", "q": "Из какого города отправляем?"},
+    {"key": "to_country", "type": "choice", "choices": COUNTRY_CHOICES, "q": "В какую страну доставляем? (Украина/Россия/Беларусь)"},
+    {"key": "to_city", "type": "text", "q": "В какой город доставляем?"},
+    {"key": "pages_a4", "type": "int", "q": "Сколько листов A4? (число)"},
+    {"key": "weight_grams", "type": "int_opt", "q": "Если знаете точный вес в граммах — укажите, иначе напишите «нет»"},
+    {"key": "urgency", "type": "choice", "choices": ["обычная", "срочная"], "q": "Срочность: обычная или срочная?"},
+    {"key": "name", "type": "name", "q": "Как к вам обращаться (имя/фамилия)?"},
+    {"key": "phone", "type": "phone", "q": "Контактный телефон (+380 / +7 / +375):"},
+    {"key": "email", "type": "email", "q": "Электронная почта:"},
+    {"key": "best_time", "type": "text", "q": "Когда вам удобнее принимать звонок/сообщение?"},
 ]
 
 RUS_NUMS = {
-    "ноль":0,"один":1,"два":2,"три":3,"четыре":4,"пять":5,"шесть":6,"семь":7,"восемь":8,"девять":9,
-    "десять":10,"одиннадцать":11,"двенадцать":12,"тринадцать":13,"четырнадцать":14,"пятнадцать":15,
-    "шестнадцать":16,"семнадцать":17,"восемнадцать":18,"девятнадцать":19,
-    "двадцать":20,"тридцать":30,"сорок":40,"пятьдесят":50,"шестьдесят":60,"семьдесят":70,"восемьдесят":80,"девяносто":90,"сто":100
+    "ноль": 0, "один": 1, "два": 2, "три": 3, "четыре": 4, "пять": 5,
+    "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+    "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
+    "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50, "шестьдесят": 60,
+    "семьдесят": 70, "восемьдесят": 80, "девяносто": 90, "сто": 100
 }
 
-def parse_int(text:str)->Optional[int]:
-    if not text: return None
-    s=text.strip().lower()
-    m=re.search(r"\d+", s)
+def parse_int(text: str) -> Optional[int]:
+    if not text:
+        return None
+    s = text.strip().lower()
+    m = re.search(r"\d+", s)
     if m:
-        try: return int(m.group())
-        except: pass
-    tokens=re.findall(r"[а-яё]+", s)
-    total=0; last=0; seen=False
+        try:
+            return int(m.group())
+        except Exception:
+            pass
+    tokens = re.findall(r"[а-яё]+", s)
+    total = 0
+    last = 0
+    seen = False
     for t in tokens:
         if t in RUS_NUMS:
-            seen=True; val=RUS_NUMS[t]
-            if val>=20 and val%10==0: last=val
+            seen = True
+            val = RUS_NUMS[t]
+            if val >= 20 and val % 10 == 0:
+                last = val
             else:
-                if last: total+=last+val; last=0
-                else: total+=val
+                if last:
+                    total += last + val
+                    last = 0
+                else:
+                    total += val
     if seen:
-        return total if total>0 else (last if last>0 else None)
+        return total if total > 0 else (last if last > 0 else None)
     return None
 
-def valid_email(s:str)->bool:
+def valid_email(s: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s.strip(), flags=re.I))
 
-def valid_phone(s:str)->bool:
-    s=s.strip().replace(" ","")
+def valid_phone(s: str) -> bool:
+    s = s.strip().replace(" ", "")
     return s.startswith("+380") or s.startswith("+7") or s.startswith("+375")
 
-def valid_name(s:str)->bool:
-    s=s.strip()
+def valid_name(s: str) -> bool:
+    s = s.strip()
     return bool(re.match(r"^[A-Za-zА-Яа-яЁё\-'\s]{2,}$", s))
 
-def ask(chat_id:int, idx:int, data:Dict):
-    field=FIELDS[idx]
-    q=field["q"]
-    # для choice дадим подсказку
-    if field["type"]=="choice":
-        q+=f" [{', '.join(field['choices'])}]"
-    # клавиатура для стран/срочности
-    kb=None
-    if field["type"]=="choice":
-        kb=ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        row=[]
+def ask(chat_id: int, idx: int, data: Dict):
+    """Задает вопрос по шагу анкеты"""
+    field = FIELDS[idx]
+    q = field["q"]
+
+    if field["type"] == "choice":
+        q += f" [{', '.join(field['choices'])}]"
+
+    kb = None
+    if field["type"] == "choice":
+        kb = ReplyKeyboardMarkup(
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            input_field_placeholder="Выберите вариант на клавиатуре ниже"
+        )
+        row = []
         for choice in field["choices"]:
             row.append(KeyboardButton(choice))
-            if len(row)==3:
-                kb.add(*row); row=[]
-        if row: kb.add(*row)
+            if len(row) == 3:
+                kb.add(*row)
+                row = []
+        if row:
+            kb.add(*row)
+
     save_message(chat_id, None, q)
     bot.send_message(chat_id, q, reply_markup=kb if kb else None)
 
-def handle_answer(chat_id:int, text:str):
+def handle_answer(chat_id: int, text: str):
+    """Обрабатывает ответ пользователя"""
+    print(f"[Handler] handle_answer called: chat_id={chat_id}, text='{text}'")
+
     state, data = get_state(chat_id)
-    if state!="collecting":
-        # не в визарде — обычный ответ
+
+    # Логируем ВСЕ входящие сообщения пользователя
+    save_message(chat_id, text, None)
+
+    if state != "collecting":
         reply = ai_reply(text)
         save_message(chat_id, text, reply)
         bot.send_message(chat_id, reply, reply_markup=main_menu())
@@ -492,86 +560,117 @@ def handle_answer(chat_id:int, text:str):
 
     data = data or {}
     idx = int(data.get("_idx", 0))
-    if idx<0 or idx>=len(FIELDS): idx=0
-    field=FIELDS[idx]
-    key=field["key"]; t=field["type"]
-    val=None; err=None
-
+    if idx < 0 or idx >= len(FIELDS):
+        idx = 0
+    field = FIELDS[idx]
+    key = field["key"]
+    t = field["type"]
+    val = None
+    err = None
     s = (text or "").strip()
 
-    if t=="text":
-        val=s if len(s)>=1 else None
-        if not val: err="Пустое значение. Повторите, пожалуйста."
-    elif t=="choice":
-        if s.title() in field["choices"]:
-            val=s.title()
+    if t == "text":
+        val = s if len(s) >= 1 else None
+        if not val:
+            err = "Пустое значение. Повторите, пожалуйста."
+
+    elif t == "choice":
+        norm_map = {str(c).lower(): c for c in field["choices"]}
+        s_norm = s.lower()
+        if s_norm in norm_map:
+            val = norm_map[s_norm]
+            print(f"[Handler] Choice accepted: '{s}' -> '{val}'")
         else:
-            err=f"Пожалуйста, выберите из вариантов: {', '.join(field['choices'])}"
-    elif t=="int":
-        n=parse_int(s)
-        if n and n>0: val=n
-        else: err="Нужно число > 0. Пример: 10"
-    elif t=="int_opt":
-        if s.lower() in {"нет","не знаю","unknown","нету","-" }:
-            val=0
+            err = f"Пожалуйста, выберите из вариантов: {', '.join(field['choices'])}"
+
+    elif t == "int":
+        n = parse_int(s)
+        if n and n > 0:
+            val = n
         else:
-            n=parse_int(s)
-            if n is None or n<0:
-                err="Укажите число (например: 120) или напишите «нет»"
+            err = "Нужно число > 0. Пример: 10"
+
+    elif t == "int_opt":
+        if s.lower() in {"нет", "не знаю", "unknown", "нету", "-"}:
+            val = 0
+        else:
+            n = parse_int(s)
+            if n is None or n < 0:
+                err = "Укажите число (например: 120) или напишите «нет»"
             else:
-                val=n
-    elif t=="phone":
-        if valid_phone(s): val=s
-        else: err="Телефон должен начинаться с +380 / +7 / +375 без лишних символов."
-    elif t=="email":
-        if valid_email(s): val=s
-        else: err="Похоже на неверный email. Пример: name@example.com"
-    elif t=="name":
-        if valid_name(s): val=s
-        else: err="Введите имя/фамилию (буквы, пробелы и дефисы; не короче 2 символов)."
+                val = n
+
+    elif t == "phone":
+        if valid_phone(s):
+            val = s
+        else:
+            err = "Телефон должен начинаться с +380 / +7 / +375 без лишних символов."
+
+    elif t == "email":
+        if valid_email(s):
+            val = s
+        else:
+            err = "Похоже на неверный email. Пример: name@example.com"
+
+    elif t == "name":
+        if valid_name(s):
+            val = s
+        else:
+            err = "Введите имя/фамилию (буквы, пробелы и дефисы; не короче 2 символов)."
 
     if err:
-        save_message(chat_id, text, err)
+        save_message(chat_id, None, err)
         bot.send_message(chat_id, err)
         ask(chat_id, idx, data)
         return
 
-    # записываем ответ
-    data[key]=val
+    # Записываем ответ
+    data[key] = val
 
-    # авторасчёт веса, если задано pages_a4, а weight_grams=0/пусто
-    if key=="pages_a4":
-        pages=int(val or 0)
-        if pages>0 and int(data.get("weight_grams") or 0)==0:
-            data["weight_grams"]=int((pages*6+5)//6*6)
+    # Авторасчёт веса
+    if key == "pages_a4":
+        pages = int(val or 0)
+        if pages > 0 and int(data.get("weight_grams") or 0) == 0:
+            data["weight_grams"] = pages * 6
 
-    # следующий шаг
-    idx+=1
-    if idx<len(FIELDS):
-        data["_idx"]=idx
+    # Следующий шаг
+    idx += 1
+    if idx < len(FIELDS):
+        data["_idx"] = idx
         update_data(chat_id, data)
+        bot.send_message(chat_id, "Принято.", reply_markup=ReplyKeyboardRemove())
         ask(chat_id, idx, data)
         return
 
-    # анкета готова → сохраним лид, начислим цену/ETA
+    # Анкета завершена
     conn = None
     try:
         if DB_URL:
-            conn=get_conn(); cur=conn.cursor()
-            cur.execute("INSERT INTO leads(chat_id,payload) VALUES(%s,%s)",
-                        (int(chat_id), psycopg2.extras.Json(data)))
-            conn.commit(); cur.close()
+            conn = get_conn()
+            if not conn:
+                print("[DB] Failed to save lead: no connection")
+            else:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO leads(chat_id,payload) VALUES(%s,%s)",
+                    (int(chat_id), psycopg2.extras.Json(data)),
+                )
+                conn.commit()
+                cur.close()
     except Exception as e:
         print(f"[DB] INSERT lead error: {e}")
     finally:
         if conn:
             return_conn(conn)
-            
-    quote=compute_quote(data)
-    price_line = f"Стоимость: €{quote['price_eur']} (до {quote['threshold_g']} г)" if quote["price_eur"] is not None else "Стоимость: по согласованию (>500 г)"
+
+    quote = compute_quote(data)
+    price_line = (
+        f"Стоимость: €{quote['price_eur']} (до {quote['threshold_g']} г)"
+        if quote["price_eur"] is not None else
+        "Стоимость: по согласованию (>500 г)"
+    )
     eta_line = f"Срок доставки: {quote['eta_text']}"
 
-    # уведомим администратора
     notify_admin_lead(chat_id, data)
 
     reply = (
@@ -581,15 +680,16 @@ def handle_answer(chat_id:int, text:str):
         f"Листов A4: {data.get('pages_a4')} (≈ {data.get('weight_grams')} г)\n"
         f"{price_line}\n{eta_line}\n\n"
         f"Связаться: {data.get('name')}, {data.get('phone')}, {data.get('email')} ({data.get('best_time')})\n\n"
-        "Если всё верно — подтвердите. Если нужно что-то изменить — просто напишите."
+        "Если всё верно — подтвердите и ожидайте ответ нашего специалиста. Если нужно что-то изменить — просто напишите."
     )
-    save_message(chat_id, text, reply)
+
+    save_message(chat_id, None, reply)
     bot.send_message(chat_id, reply, reply_markup=main_menu())
     set_state(chat_id, "completed")
 
 # ------------ UI / Handlers ------------
 def main_menu():
-    kb=ReplyKeyboardMarkup(resize_keyboard=True)
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton("/consult"))
     kb.add(KeyboardButton("/reset"))
     kb.add(KeyboardButton("/news"))
@@ -597,29 +697,32 @@ def main_menu():
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    msg=("Добро пожаловать в IS-Logix DocuBridge! 🇸🇰📄\n"
-        "Нажмите /consult чтобы начать расчёт и оформление заявки.")
+    msg = (
+        "Добро пожаловать в IS-Logix DocuBridge! 🇸🇰📄\n"
+        "Нажмите /consult чтобы начать расчёт и оформление заявки."
+    )
     save_message(message.chat.id, "/start", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
 
 @bot.message_handler(commands=['consult'])
 def consult(message):
-    # начинаем визард с нулевого шага
-    data={"_idx":0}
+    data = {"_idx": 0}
     set_state(message.chat.id, "collecting", data)
     ask(message.chat.id, 0, data)
 
 @bot.message_handler(commands=['reset'])
 def reset(message):
     set_state(message.chat.id, "greeting", {})
-    msg="Сбросил сессию. Нажмите /consult чтобы начать заново."
+    msg = "Сбросил сессию. Нажмите /consult чтобы начать заново."
     save_message(message.chat.id, "/reset", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
 
 @bot.message_handler(commands=['news'])
 def news(message):
-    msg=("Новости DocuBridge: https://t.me/DocuBridgeInfo\n"
-        "Готов помочь с вашим кейсом — /consult.")
+    msg = (
+        "Новости DocuBridge: https://t.me/DocuBridgeInfo\n"
+        "Готов помочь с вашим кейсом — /consult."
+    )
     save_message(message.chat.id, "/news", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
 
@@ -631,7 +734,6 @@ def ai_ping(message):
 
 @bot.message_handler(func=lambda m: True)
 def any_text(message):
-    # либо шаг визарда, либо обычный ответ ИИ
     handle_answer(message.chat.id, message.text)
 
 # ------------ Webhook ------------
@@ -639,49 +741,42 @@ def any_text(message):
 def index():
     return "OK", 200
 
-# Вспомогательная функция, которая запускает обработку в фоне
-#def process_update_async(data):
-#    try:
-#        update=Update.de_json(json.loads(data.decode("utf-8")))
-#        bot.process_new_updates([update])
-#    except Exception as e:
-#        print("[Webhook] Async error:", e); traceback.print_exc()
-
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def telegram_webhook():
     try:
         if request.headers.get("content-type") == "application/json":
             json_data = json.loads(request.get_data().decode("utf-8"))
             update = Update.de_json(json_data)
-            
+
             update_id = update.update_id
-            print(f"[Webhook] Received update_id: {update_id}")  # <-- ДОБАВИТЬ
-            
+            print(f"[Webhook] Received update_id: {update_id}")
+
             if is_update_processed(update_id):
                 print(f"[Webhook] Update {update_id} уже обработан, пропускаем")
                 return "OK", 200
-            
+
             mark_update_processed(update_id)
-            print(f"[Webhook] Processing update_id: {update_id}")  # <-- ДОБАВИТЬ
-            
+            print(f"[Webhook] Processing update_id: {update_id}")
+
             bot.process_new_updates([update])
-            print(f"[Webhook] Update {update_id} processed successfully")  # <-- ДОБАВИТЬ
+            print(f"[Webhook] Update {update_id} processed successfully")
         else:
             print("[Webhook] Unsupported content-type")
     except Exception as e:
         print("[Webhook] error:", e)
         traceback.print_exc()
     return "OK", 200
-        
+
 def ensure_webhook():
     try:
         if not WEBHOOK_BASE:
             print("❌ ERROR: WEBHOOK_BASE не задан — бот не будет работать!")
             print("Установите WEBHOOK_BASE в .env файле")
-            raise SystemExit(1)  # Останавливаем запуск
-        url=f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
+            raise SystemExit(1)
+
+        url = f"{WEBHOOK_BASE}/webhook/{WEBHOOK_SECRET}"
         bot.remove_webhook()
-        ok=bot.set_webhook(url=url, drop_pending_updates=True)
+        ok = bot.set_webhook(url=url, drop_pending_updates=True)
         if ok:
             print(f"✅ Webhook set to: {url}")
         else:
@@ -692,7 +787,7 @@ def ensure_webhook():
         raise SystemExit(1)
 
 # ------------ Entrypoint ------------
-init_db_pool()      # Создаем пул соединений
+init_db_pool()
 ensure_tables()
 ensure_webhook()
 
