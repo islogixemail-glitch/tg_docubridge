@@ -115,6 +115,25 @@ def ensure_tables():
             return_conn(conn)  # Возвращаем в пул вместо close()
 
 def is_update_processed(update_id: int) -> bool:
+    conn = None  # <-- ДОБАВИТЬ эту строку
+    if not DB_URL:
+        return False
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM processed_updates WHERE update_id = %s", 
+            (update_id,)
+        )
+        exists = cur.fetchone() is not None
+        cur.close()
+        return exists
+    except Exception as e:
+        print(f"[DB] is_update_processed error: {e}")
+        return False
+    finally:
+        if conn:
+            return_conn(conn)
     """Проверяет, было ли обновление уже обработано"""
     if not DB_URL:
         return False  # Без БД не можем проверить
@@ -196,6 +215,7 @@ def save_message(chat_id: int, user_text: Optional[str], bot_reply: Optional[str
     # Уведомления будут только при завершении визарда (в notify_admin_lead)
 
 def get_state(chat_id: int) -> Tuple[str, Dict]:
+    conn = None
     try:
         if not DB_URL:
             return ("greeting", {})
@@ -212,6 +232,7 @@ def get_state(chat_id: int) -> Tuple[str, Dict]:
             return_conn(conn)  # Возвращаем в пул вместо close()    
 
 def set_state(chat_id: int, state: str, data: Optional[Dict]=None):
+    conn = None
     try:
         if not DB_URL: return
         conn = get_conn(); cur = conn.cursor()
@@ -457,15 +478,19 @@ def handle_answer(chat_id:int, text:str):
         return
 
     # анкета готова → сохраним лид, начислим цену/ETA
+    conn = None
     try:
         if DB_URL:
             conn=get_conn(); cur=conn.cursor()
             cur.execute("INSERT INTO leads(chat_id,payload) VALUES(%s,%s)",
                         (int(chat_id), psycopg2.extras.Json(data)))
-            conn.commit(); cur.close(); conn.close()
+            conn.commit(); cur.close()
     except Exception as e:
         print(f"[DB] INSERT lead error: {e}")
-
+    finally:
+        if conn:
+            return_conn(conn)
+            
     quote=compute_quote(data)
     price_line = f"Стоимость: €{quote['price_eur']} (до {quote['threshold_g']} г)" if quote["price_eur"] is not None else "Стоимость: по согласованию (>500 г)"
     eta_line = f"Срок доставки: {quote['eta_text']}"
@@ -539,12 +564,12 @@ def index():
     return "OK", 200
 
 # Вспомогательная функция, которая запускает обработку в фоне
-def process_update_async(data):
-    try:
-        update=Update.de_json(json.loads(data.decode("utf-8")))
-        bot.process_new_updates([update])
-    except Exception as e:
-        print("[Webhook] Async error:", e); traceback.print_exc()
+#def process_update_async(data):
+#    try:
+#        update=Update.de_json(json.loads(data.decode("utf-8")))
+#        bot.process_new_updates([update])
+#    except Exception as e:
+#        print("[Webhook] Async error:", e); traceback.print_exc()
 
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def telegram_webhook():
