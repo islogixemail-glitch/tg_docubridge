@@ -38,25 +38,14 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret-path")
 PORT = int(os.getenv("PORT", "5000"))
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Список админов через запятую (например: "12345,67890")
-_ADMIN_IDS_RAW = os.getenv("ADMIN_CHAT_IDS", "").strip()
-ADMIN_CHAT_IDS = []
-if _ADMIN_IDS_RAW:
-    for tok in _ADMIN_IDS_RAW.split(","):
-        tok = tok.strip()
-        if tok:
-            try:
-                ADMIN_CHAT_IDS.append(int(tok))
-            except Exception:
-                pass
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # один ID, как на Render
 
 # ------------ App/Bot/AI ------------
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 print(f"[OpenAI] client is {'ON' if client else 'OFF'}")
-print(f"[ADMIN] Admin IDs: {ADMIN_CHAT_IDS or '— (не задано)'}")
+print(f"[ADMIN] Admin ID: {ADMIN_CHAT_ID or '— (не задан)'}")
 
 # ------------ DB Connection Pool ------------
 connection_pool = None
@@ -375,7 +364,7 @@ def update_data(chat_id: int, new_data: Dict):
         if conn:
             return_conn(conn)
 
-# ------------ OpenAI: общие ответы ------------
+# ------------ OpenAI (общие ответы) ------------
 def ai_reply(text: str) -> str:
     if not client:
         return "Сейчас умные ответы временно недоступны. Опишите задачу — менеджер поможет."
@@ -444,10 +433,15 @@ def compute_quote(d: Dict) -> Dict:
         "notes": notes,
     }
 
-# ------------ Уведомление админам (НЕ пользователю) ------------
+# ------------ Уведомление админу (НЕ пользователю) ------------
 def notify_admin_lead(source_chat_id: int, payload: Dict):
-    if not ADMIN_CHAT_IDS:
-        print("[ADMIN] ADMIN_CHAT_IDS не задан — уведомление не отправлено")
+    """Отправляет карточку лида администратору. Пользователю НЕ показывается.
+       Если админ тестирует из того же чата, уведомление подавляется."""
+    if not ADMIN_CHAT_ID:
+        print("[ADMIN] ADMIN_CHAT_ID не задан — уведомление не отправлено")
+        return
+    if ADMIN_CHAT_ID == source_chat_id:
+        print("[ADMIN] ADMIN_CHAT_ID совпадает с chat_id пользователя — уведомление пропущено (тестовый режим).")
         return
     try:
         q = compute_quote(payload)
@@ -475,11 +469,7 @@ def notify_admin_lead(source_chat_id: int, payload: Dict):
             f"Email: {payload.get('email', '—')}",
             f"Лучшее время связи: {payload.get('best_time', '—')}",
         ]
-        msg = "\n".join(lines)
-        # отправим всем админам, кроме инициатора чата
-        for admin_id in ADMIN_CHAT_IDS:
-            if admin_id != source_chat_id:
-                bot.send_message(admin_id, msg, parse_mode="Markdown")
+        bot.send_message(ADMIN_CHAT_ID, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         print(f"[ADMIN notify] lead notify error: {e}")
 
@@ -551,8 +541,62 @@ def valid_name(s: str) -> bool:
     s = s.strip()
     return bool(re.match(r"^[A-Za-zА-Яа-яЁё\-'\s]{2,}$", s))
 
-# ------------ ИИ: распознавание намерений ------------
+# ------------ ИИ + ЭВРИСТИКИ: распознавание намерений ------------
 AI_KEYS = {"doc_type","from_country","from_city","to_country","to_city","pages_a4","weight_grams","urgency","name","phone","email","best_time"}
+
+URGENCY_SYNONYMS = {
+    "срочная": [
+        "срочно","срочная","экспресс","быстро","быстрее",
+        "как можно быстрее","urgent","express","ускоренная","максимально быстро"
+    ],
+    "обычная": [
+        "обычно","обычная","стандарт","нормально","не срочно","несрочно",
+        "без спешки","standard","normal"
+    ],
+}
+
+def infer_urgency(text: str) -> Optional[str]:
+    s = (text or "").lower()
+    for label, words in URGENCY_SYNONYMS.items():
+        for w in words:
+            if w in s:
+                return label
+    return None
+
+def heuristic_parse(text: str) -> Optional[Dict[str, Any]]:
+    """Быстрый локальный парсер: вытаскивает срочность/страницы/вес без ИИ."""
+    if not text:
+        return None
+    out: Dict[str, Any] = {}
+
+    # срочность
+    u = infer_urgency(text)
+    if u:
+        out["urgency"] = u
+
+    # вес, г (например: "70 г", "100гр", "20 грамм")
+    m = re.search(r"(\d+)\s*(?:г|гр|грамм)", text.lower())
+    if m:
+        try:
+            out["weight_grams"] = int(m.group(1))
+        except:
+            pass
+
+    # страницы (например: "4 стр", "3 листа")
+    m = re.search(r"(\d+)\s*(?:стр|лист)", text.lower())
+    if m:
+        try:
+            out["pages_a4"] = int(m.group(1))
+        except:
+            pass
+
+    # автоподстановка веса по страницам
+    if "pages_a4" in out and "weight_grams" not in out:
+        pages = int(out["pages_a4"] or 0)
+        if pages > 0:
+            out["weight_grams"] = pages * 6
+
+    return out or None
 
 def normalize_country(x: Optional[str]) -> Optional[str]:
     if not x: return None
@@ -572,6 +616,7 @@ def normalize_urgency(x: Optional[str]) -> Optional[str]:
     return None
 
 def ai_understand(text: str) -> Optional[Dict[str, Any]]:
+    """Пытается извлечь JSON с полями анкеты из свободного текста пользователя."""
     if not client:
         return None
     try:
@@ -621,6 +666,7 @@ def ai_understand(text: str) -> Optional[Dict[str, Any]]:
                 if sv:
                     cleaned[k] = sv
 
+        # быстрая валидация контактов
         if "phone" in cleaned and not valid_phone(cleaned["phone"]):
             cleaned.pop("phone", None)
         if "email" in cleaned and not valid_email(cleaned["email"]):
@@ -628,6 +674,7 @@ def ai_understand(text: str) -> Optional[Dict[str, Any]]:
         if "name" in cleaned and not valid_name(cleaned["name"]):
             cleaned.pop("name", None)
 
+        # автоподстановка веса по страницам
         if "pages_a4" in cleaned and ("weight_grams" not in cleaned or cleaned.get("weight_grams",0) == 0):
             pages = int(cleaned["pages_a4"] or 0)
             if pages > 0:
@@ -639,6 +686,7 @@ def ai_understand(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 def first_missing_index(data: Dict) -> int:
+    """Возвращает индекс первого незаполненного поля по FIELDS; если всё заполнено — len(FIELDS)."""
     def is_filled(field, value) -> bool:
         t = field["type"]
         if value is None:
@@ -674,6 +722,7 @@ def first_missing_index(data: Dict) -> int:
     return len(FIELDS)
 
 def merge_ai_data(existing: Dict, parsed: Dict) -> Dict:
+    """Мержит распознанные поля в data, не стирая уже заполненные значения."""
     merged = dict(existing or {})
     for k in AI_KEYS:
         if k in parsed and (merged.get(k) in (None, "", 0) or k not in merged):
@@ -720,9 +769,9 @@ def handle_answer(chat_id: int, text: str):
     state, data = get_state(chat_id)
     save_message(chat_id, text, None)
 
-    # ВНЕ визарда: пробуем ИИ-структурирование → автозаполнение анкеты
+    # ВНЕ визарда: сначала эвристика, потом ИИ
     if state != "collecting":
-        parsed = ai_understand(text)
+        parsed = heuristic_parse(text) or ai_understand(text)
         if parsed:
             print(f"[AI] Parsed intent: {parsed}")
             data = merge_ai_data({}, parsed)
@@ -741,9 +790,9 @@ def handle_answer(chat_id: int, text: str):
         bot.send_message(chat_id, reply, reply_markup=main_menu())
         return
 
-    # В ВИЗАРДЕ: тоже попробуем ИИ, если ввод «свободный»
+    # В ВИЗАРДЕ: тоже пытаемся распознать свободный текст
     data = data or {}
-    ai_try = ai_understand(text)
+    ai_try = heuristic_parse(text) or ai_understand(text)
     if ai_try:
         print(f"[AI] In-wizard parsed: {ai_try}")
         data = merge_ai_data(data, ai_try)
@@ -775,6 +824,13 @@ def handle_answer(chat_id: int, text: str):
     elif t == "choice":
         norm_map = {str(c).lower(): c for c in field["choices"]}
         s_norm = s.lower()
+
+        # если это срочность — принимаем синонимы (быстро/экспресс/несрочно и т.п.)
+        if key == "urgency":
+            syn = infer_urgency(s)
+            if syn:
+                s_norm = syn
+
         if s_norm in norm_map:
             val = norm_map[s_norm]
             print(f"[Handler] Choice accepted: '{s}' -> '{val}'")
@@ -864,7 +920,7 @@ def finalize_form(chat_id: int, data: Dict, last_user_text: Optional[str] = None
     eta_line = f"Срок доставки: {quote['eta_text']}"
     notes_line = f"{quote['notes']}" if quote.get("notes") else None
 
-    # Уведомляем только админов (не пользователя)
+    # Уведомляем только админа (не пользователя)
     notify_admin_lead(chat_id, data)
 
     reply = (
