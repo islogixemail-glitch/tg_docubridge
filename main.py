@@ -383,21 +383,34 @@ def ai_reply(text: str) -> str:
         print(f"[OpenAI] error: {e}")
         return "Небольшая пауза на стороне ИИ. Попробуйте ещё раз."
 
-# ------------ Тариф/ETA ------------
-TARIFF_TABLE = [(50, 60), (100, 65), (500, 85)]  # € по весовым порогам
+# ------------ Тарифы (единые по всем направлениям) ------------
+# две скорости: "обычная" и "срочная"
+PRICING = {
+    "обычная": [(50, 65), (100, 85)],   # ≤50г — €65; ≤100г — €85
+    "срочная": [(50, 110), (100, 130)], # ≤50г — €110; ≤100г — €130
+}
 
-def base_price(weight: int):
-    for thr, price in TARIFF_TABLE:
+def base_price(weight: int, tariff_table):
+    """Возвращает (price, threshold) по весу из заданной тарифной таблицы; иначе (None, None)."""
+    for thr, price in tariff_table:
         if weight <= thr:
             return price, thr
     return None, None
 
 def compute_quote(d: Dict) -> Dict:
-    fc = (d.get("from_country", "").title())
-    tc = (d.get("to_country", "").title())
-    w = int(d.get("weight_grams") or 0)
-    price, thr = base_price(w)
+    """Считает цену и срок. Цена — по единым правилам, срок — по маршруту (как раньше)."""
+    fc = (d.get("from_country", "") or "").title()
+    tc = (d.get("to_country", "") or "").title()
+    w  = int(d.get("weight_grams") or 0)
 
+    # скорость (по умолчанию — "обычная")
+    urgency = (d.get("urgency") or "обычная").strip().lower()
+    if urgency not in PRICING:
+        urgency = "обычная"
+
+    price, thr = base_price(w, PRICING[urgency])
+
+    # ETA — прежняя логика маршрутов
     if fc == "Украина" and tc == "Россия":
         eta = "27–29 дней"
     elif fc == "Украина" and tc == "Беларусь":
@@ -407,22 +420,30 @@ def compute_quote(d: Dict) -> Dict:
     else:
         eta = "требует подтверждения маршрута"
 
-    notes = None
-    if fc in {"Россия", "Беларусь"} and tc == "Украина" and thr == 50:
-        price = 50
-        notes = "спец-тариф для РФ/РБ → UA (до 50 г)"
+    # Если вес не попадает в наши пределы ( >100 г ) или неизвестен (=0) — по согласованию
+    if w == 0 or price is None:
+        return {
+            "price_eur": None,
+            "threshold_g": None,
+            "eta_text": eta,
+            "notes": "вес 0 г или >100 г — стоимость по согласованию",
+        }
 
-    if price is None:
-        return {"price_eur": None, "threshold_g": None, "eta_text": eta, "notes": "вес >500 г — по согласованию"}
+    notes = "ускоренная доставка" if urgency == "срочная" else None
 
-    return {"price_eur": price, "threshold_g": thr, "eta_text": eta, "notes": notes}
+    return {
+        "price_eur": price,
+        "threshold_g": thr,
+        "eta_text": eta,
+        "notes": notes,
+    }
 
 def notify_admin_lead(chat_id: int, payload: Dict):
     if not ADMIN_CHAT_ID:
         return
     try:
         q = compute_quote(payload)
-        price_line = f"Оценка: €{q['price_eur']} (до {q['threshold_g']} г)" if q["price_eur"] is not None else "Оценка: по согласованию (>500 г)"
+        price_line = f"Оценка: €{q['price_eur']} (до {q['threshold_g']} г)" if q["price_eur"] is not None else "Оценка: по согласованию"
         eta_line = f"Срок: {q['eta_text']}"
         note_line = f"Примечание: {q['notes']}" if q.get("notes") else None
         lines = [
@@ -434,16 +455,18 @@ def notify_admin_lead(chat_id: int, payload: Dict):
             f"Листов A4: {payload.get('pages_a4', 0)}, вес ≈ {payload.get('weight_grams', 0)} г",
             f"Срочность: {payload.get('urgency', '—')}",
             "",
-            f"Имя: {payload.get('name', '—')}",
-            f"Телефон: {payload.get('phone', '—')}",
-            f"Email: {payload.get('email', '—')}",
-            f"Лучшее время связи: {payload.get('best_time', '—')}",
-            "",
             price_line,
             eta_line,
         ]
         if note_line:
             lines.append(note_line)
+        lines += [
+            "",
+            f"Имя: {payload.get('name', '—')}",
+            f"Телефон: {payload.get('phone', '—')}",
+            f"Email: {payload.get('email', '—')}",
+            f"Лучшее время связи: {payload.get('best_time', '—')}",
+        ]
         bot.send_message(ADMIN_CHAT_ID, "\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         print(f"[ADMIN notify] lead notify error: {e}")
@@ -667,9 +690,10 @@ def handle_answer(chat_id: int, text: str):
     price_line = (
         f"Стоимость: €{quote['price_eur']} (до {quote['threshold_g']} г)"
         if quote["price_eur"] is not None else
-        "Стоимость: по согласованию (>500 г)"
+        "Стоимость: по согласованию"
     )
     eta_line = f"Срок доставки: {quote['eta_text']}"
+    notes_line = f"{quote['notes']}" if quote.get("notes") else None
 
     notify_admin_lead(chat_id, data)
 
@@ -678,7 +702,8 @@ def handle_answer(chat_id: int, text: str):
         f"Маршрут: {data.get('from_city')}, {data.get('from_country')} → "
         f"{data.get('to_city')}, {data.get('to_country')}\n"
         f"Листов A4: {data.get('pages_a4')} (≈ {data.get('weight_grams')} г)\n"
-        f"{price_line}\n{eta_line}\n\n"
+        f"{price_line}\n{eta_line}\n"
+        + (f"{notes_line}\n\n" if notes_line else "\n") +
         f"Связаться: {data.get('name')}, {data.get('phone')}, {data.get('email')} ({data.get('best_time')})\n\n"
         "Если всё верно — просто ожидайте ответ нашего специалиста. Если нужно что-то изменить — пройдите опрос снова."
     )
@@ -698,7 +723,7 @@ def main_menu():
 @bot.message_handler(commands=['start'])
 def start(message):
     msg = (
-        "Добро пожаловать в DocuBridge (проект от IS-Logix) ! 🇸🇰📄\n"
+        "Добро пожаловать в IS-Logix DocuBridge! 🇸🇰📄\n"
         "Нажмите /consult чтобы начать расчёт и оформление заявки."
     )
     save_message(message.chat.id, "/start", msg)
