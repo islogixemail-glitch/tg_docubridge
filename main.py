@@ -418,7 +418,6 @@ def compute_quote(d: Dict) -> Dict:
         urgency = "обычная"
 
     price, thr = base_price(w, PRICING[urgency])
-
     eta_work = eta_working_days(fc, tc)
 
     if w == 0 or price is None:
@@ -452,7 +451,6 @@ def notify_admin_lead(source_chat_id: int, payload: Dict):
     try:
         q = compute_quote(payload)
         price_line = f"Оценка: €{q['price_eur']} (до {q['threshold_g']} г)" if q["price_eur"] is not None else "Оценка: по согласованию"
-        # Для админа оставим старую детализацию по маршруту
         eta_line = (
             f"Срок: ориентировочно {q['eta_working']} рабочих дней" if q.get("eta_working")
             else "Срок: требует подтверждения маршрута"
@@ -583,7 +581,7 @@ def heuristic_parse(text: str) -> Optional[Dict[str, Any]]:
     if u:
         out["urgency"] = u
 
-    # вес, г (например: "70 г", "100гр", "20 грамм")
+    # вес, г
     m = re.search(r"(\d+)\s*(?:г|гр|грамм)", text.lower())
     if m:
         try:
@@ -591,7 +589,7 @@ def heuristic_parse(text: str) -> Optional[Dict[str, Any]]:
         except:
             pass
 
-    # страницы (например: "4 стр", "3 листа")
+    # страницы
     m = re.search(r"(\d+)\s*(?:стр|лист)", text.lower())
     if m:
         try:
@@ -675,7 +673,6 @@ def ai_understand(text: str) -> Optional[Dict[str, Any]]:
                 if sv:
                     cleaned[k] = sv
 
-        # быстрая валидация контактов
         if "phone" in cleaned and not valid_phone(cleaned["phone"]):
             cleaned.pop("phone", None)
         if "email" in cleaned and not valid_email(cleaned["email"]):
@@ -683,7 +680,6 @@ def ai_understand(text: str) -> Optional[Dict[str, Any]]:
         if "name" in cleaned and not valid_name(cleaned["name"]):
             cleaned.pop("name", None)
 
-        # автоподстановка веса по страницам
         if "pages_a4" in cleaned and ("weight_grams" not in cleaned or cleaned.get("weight_grams",0) == 0):
             pages = int(cleaned["pages_a4"] or 0)
             if pages > 0:
@@ -826,22 +822,16 @@ def try_extract_value_for_key(key: str, text: str) -> Optional[Any]:
     return None
 
 def detect_jump_or_edit(text: str) -> Tuple[Optional[str], Optional[Any]]:
-    """
-    Возвращает (key, new_value):
-      - key: какой шаг запросили (на него прыгать)
-      - new_value: если в фразе есть новое значение — сразу применить
-    """
+    """Возвращает (key, new_value) для команд: верни/исправь/поменяй ... [на <значение>]"""
     s = (text or "").lower()
     if not s:
         return (None, None)
-
     if any(w in s for w in ["верни", "вернуть", "вернись", "исправ", "поправ", "измен", "поменя", "коррект"]):
         key = alias_to_key(s)
         if not key:
             return (None, None)
         new_val = try_extract_value_for_key(key, text)
         return (key, new_val)
-
     return (None, None)
 
 # ------------ UI / Диалог ------------
@@ -895,7 +885,7 @@ def handle_answer(chat_id: int, text: str):
             if idx >= len(FIELDS):
                 return finalize_form(chat_id, data, last_user_text=text)
         else:
-            idx = next((i for i,f in enumerate(FIELDS) if f["key"] == jump_key), 0)
+            idx = next((i for i, f in enumerate(FIELDS) if f["key"] == jump_key), 0)
 
         data["_idx"] = idx
         set_state(chat_id, "collecting", data)
@@ -924,21 +914,25 @@ def handle_answer(chat_id: int, text: str):
         bot.send_message(chat_id, reply, reply_markup=main_menu())
         return
 
-    # В ВИЗАРДЕ: тоже пытаемся распознать свободный текст
+    # В ВИЗАРДЕ: пробуем распознать текст, но применяем ТОЛЬКО если данные реально изменились
     data = data or {}
     ai_try = heuristic_parse(text) or ai_understand(text)
     if ai_try:
-        print(f"[AI] In-wizard parsed: {ai_try}")
-        data = merge_ai_data(data, ai_try)
-        idx = first_missing_index(data)
-        if idx >= len(FIELDS):
-            return finalize_form(chat_id, data, last_user_text=text)
-        else:
-            data["_idx"] = idx
-            update_data(chat_id, data)
-            bot.send_message(chat_id, "Принято. Продолжим.", reply_markup=ReplyKeyboardRemove())
-            ask(chat_id, idx, data)
-            return
+        before = dict(data)
+        merged = merge_ai_data(data, ai_try)
+        if merged != before:
+            print(f"[AI] In-wizard parsed & applied: {ai_try}")
+            data = merged
+            idx = first_missing_index(data)
+            if idx >= len(FIELDS):
+                return finalize_form(chat_id, data, last_user_text=text)
+            else:
+                data["_idx"] = idx
+                update_data(chat_id, data)
+                bot.send_message(chat_id, "Принято. Продолжим.", reply_markup=ReplyKeyboardRemove())
+                ask(chat_id, idx, data)
+                return
+        # иначе ИИ ничего полезного не добавил — идём на обычную валидацию
 
     # обычная пошаговая валидация
     idx = int(data.get("_idx", 0))
@@ -1049,7 +1043,7 @@ def finalize_form(chat_id: int, data: Dict, last_user_text: Optional[str] = None
         "Стоимость: по согласованию"
     )
 
-    # формирование строки срока в зависимости от срочности
+    # строка срока
     if quote.get("urgency") == "срочная":
         eta_line = "Срок доставки: ускоренная доставка"
     else:
