@@ -24,4 +24,4 @@ PORT = int(os.getenv("PORT", "5000"))
 
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-MANAGER_CONTACT = os.getenv("MANAGER_CONTACT", "@DocuBridgeSupport")
+MANAGER_CONTACT = os.getenv("MANAGER_CONTACT", "@is_logix")
