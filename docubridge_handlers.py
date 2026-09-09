@@ -15,21 +15,40 @@ from docubridge_flow import *  # noqa: F401,F403
 def start(message):
     parts = (message.text or "").split(maxsplit=1)
     ref = parts[1].strip() if len(parts) > 1 else None
+    action = resolve_start_payload(ref)
+
+    if action.get("kind") == "route":
+        start_send_flow(
+            message.chat.id,
+            role=action.get("role") or "sender",
+            ref=ref,
+            from_country=action.get("from_country"),
+            to_country=action.get("to_country"),
+        )
+        return
+
     data = {}
     if ref:
         data["ref"] = ref
         data["start_payload"] = ref
     set_state(message.chat.id, "greeting", data)
-    msg = (
-        "Добро пожаловать в DocuBridge!\n\n"
-        "Международная доставка документов по маршрутам:\n"
-        "• Украина → Россия\n"
-        "• Украина → Беларусь\n"
-        "• Россия → Украина\n"
-        "• Беларусь → Украина\n\n"
-        "Сначала покажем ориентировочную цену и срок — контакты только если решите оформить заявку.\n"
-        "Выберите действие в меню:"
-    )
+
+    if action.get("kind") == "menu" and ref:
+        msg = (
+            "Вы пришли с витрины DocuBridge.\n"
+            "Выберите: отправить документы, получить документы или другой пункт меню."
+        )
+    else:
+        msg = (
+            "Добро пожаловать в DocuBridge!\n\n"
+            "Международная доставка документов по маршрутам:\n"
+            "• Украина → Россия\n"
+            "• Украина → Беларусь\n"
+            "• Россия → Украина\n"
+            "• Беларусь → Украина\n\n"
+            "Сначала покажем ориентировочную цену и срок — контакты только если решите оформить заявку.\n"
+            "Выберите действие в меню:"
+        )
     save_message(message.chat.id, "/start", msg)
     bot.send_message(message.chat.id, msg, reply_markup=main_menu())
 

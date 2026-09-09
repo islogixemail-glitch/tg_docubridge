@@ -15,11 +15,30 @@ def go_menu(chat_id: int, text: Optional[str] = None):
     bot.send_message(chat_id, msg, reply_markup=main_menu())
 
 
-def start_send_flow(chat_id: int, role: str = "sender", ref: Optional[str] = None):
+def start_send_flow(
+    chat_id: int,
+    role: str = "sender",
+    ref: Optional[str] = None,
+    from_country: Optional[str] = None,
+    to_country: Optional[str] = None,
+):
     data: Dict[str, Any] = {"role": role}
     if ref:
         data["ref"] = ref
         data["start_payload"] = ref
+    fc = normalize_country(from_country) if from_country else None
+    tc = normalize_country(to_country) if to_country else None
+    if fc and tc and is_allowed_route(fc, tc):
+        data["from_country"] = fc
+        data["to_country"] = tc
+        set_state(chat_id, "ask_from_city", data)
+        msg = (
+            f"Маршрут: {fc} → {tc}.\n"
+            "Из какого города отправляем?"
+        )
+        save_message(chat_id, None, msg)
+        bot.send_message(chat_id, msg, reply_markup=ReplyKeyboardRemove())
+        return
     set_state(chat_id, "choose_route", data)
     role_ru = "получателя" if role == "receiver" else "отправителя"
     msg = (

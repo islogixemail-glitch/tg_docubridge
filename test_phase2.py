@@ -109,5 +109,36 @@ class TestVolumeParse(unittest.TestCase):
         self.assertEqual(weight, 240)
 
 
+
+class TestStartPayload(unittest.TestCase):
+    def test_bare_start_welcome(self):
+        self.assertEqual(m.resolve_start_payload(None)["kind"], "welcome")
+        self.assertEqual(m.resolve_start_payload("")["kind"], "welcome")
+        self.assertEqual(m.resolve_start_payload("  ")["kind"], "welcome")
+
+    def test_route_payloads(self):
+        cases = {
+            "ua_ru": ("Украина", "Россия"),
+            "UA_RU": ("Украина", "Россия"),
+            "ua_by": ("Украина", "Беларусь"),
+            "ru_ua": ("Россия", "Украина"),
+            "by_ua": ("Беларусь", "Украина"),
+        }
+        for payload, pair in cases.items():
+            action = m.resolve_start_payload(payload)
+            self.assertEqual(action["kind"], "route", payload)
+            self.assertEqual(action["from_country"], pair[0], payload)
+            self.assertEqual(action["to_country"], pair[1], payload)
+            self.assertEqual(action["role"], "sender", payload)
+            self.assertTrue(m.is_allowed_route(action["from_country"], action["to_country"]))
+
+    def test_dokumenty_and_unknown_menu(self):
+        self.assertEqual(m.resolve_start_payload("dokumenty")["kind"], "menu")
+        self.assertEqual(m.resolve_start_payload("Dokumenty")["kind"], "menu")
+        self.assertEqual(m.resolve_start_payload("something_unknown")["kind"], "menu")
+        self.assertEqual(m.resolve_start_payload("eu_xx")["kind"], "menu")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

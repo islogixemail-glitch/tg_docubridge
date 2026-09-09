@@ -26,6 +26,42 @@ ROUTE_BY_LABEL = {
     "Беларусь → Украина": ("Беларусь", "Украина"),
 }
 
+# Deep-link /start payloads (site showcase → bot)
+START_PAYLOAD_ROUTES = {
+    "ua_ru": ("Украина", "Россия"),
+    "ua_by": ("Украина", "Беларусь"),
+    "ru_ua": ("Россия", "Украина"),
+    "by_ua": ("Беларусь", "Украина"),
+}
+
+
+def normalize_start_payload(payload: Optional[str]) -> str:
+    return (payload or "").strip().lower()
+
+
+def resolve_start_payload(payload: Optional[str]) -> Dict:
+    """Map /start deep-link payload to an action.
+
+    Returns:
+      {"kind": "welcome"} — bare /start
+      {"kind": "menu"} — dokumenty or unknown (caller still saves ref)
+      {"kind": "route", "from_country", "to_country", "role"} — open quote-first on route
+    """
+    key = normalize_start_payload(payload)
+    if not key:
+        return {"kind": "welcome"}
+    if key == "dokumenty":
+        return {"kind": "menu"}
+    route = START_PAYLOAD_ROUTES.get(key)
+    if route:
+        return {
+            "kind": "route",
+            "from_country": route[0],
+            "to_country": route[1],
+            "role": "sender",
+        }
+    return {"kind": "menu"}
+
 # Display labels (RU) ↔ internal status keys
 TRACK_STATUSES: List[str] = [
     "accepted",
