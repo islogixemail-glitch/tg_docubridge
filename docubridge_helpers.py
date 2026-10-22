@@ -79,8 +79,8 @@ TRACK_STATUS_RU = {
     "delivered": "доставлено",
 }
 
-# Envelope floor: ≤500 g ordinary → €95; urgent higher; over 0.5 kg → по согласованию
-PRICE_ORDINARY_EUR = 95
+# Envelope floor: ≤500 g ordinary → €140; urgent higher; over 0.5 kg → по согласованию
+PRICE_ORDINARY_EUR = 140
 PRICE_URGENT_EUR = 145
 ENVELOPE_MAX_G = 500
 ETA_RANGE = "10–14"
