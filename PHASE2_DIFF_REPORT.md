@@ -10,7 +10,7 @@
 
 ## Pricing / ETA
 - **Before:** €65/€85 (≤50g/≤100g); ETA 21–29 / 27–29 style; reverse routes “needs confirmation”.
-- **After:** from **€95** ordinary for envelope ≤500g; urgent higher (€145); >500g по согласованию; ETA **10–14** business days on all allowed routes.
+- **After:** from **€140** ordinary for envelope ≤500g; urgent higher (€145); >500g по согласованию; ETA **10–14** business days on all allowed routes.
 
 ## Menu
 - **Before:** `/consult`, `/reset`, `/news`.
@@ -31,4 +31,4 @@
 - Added: `shipments` (+ optional `leads.ticket`).
 
 ## Tests
-- `test_phase2.py` covers allow/deny routes, price 95, ETA 10–14, ticket `DB\d+`, ordered track statuses.
+- `test_phase2.py` covers allow/deny routes, price 140, ETA 10–14, ticket `DB\d+`, ordered track statuses.

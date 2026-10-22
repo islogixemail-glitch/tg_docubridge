@@ -38,17 +38,17 @@ class TestRoutes(unittest.TestCase):
 
 
 class TestPricingEta(unittest.TestCase):
-    def test_price_envelope_ordinary_95(self):
-        self.assertEqual(m.base_price_eur(500, "обычная"), 95)
-        self.assertEqual(m.base_price_eur(100, "обычная"), 95)
-        self.assertEqual(m.base_price_eur(1, "обычная"), 95)
+    def test_price_envelope_ordinary_140(self):
+        self.assertEqual(m.base_price_eur(500, "обычная"), 140)
+        self.assertEqual(m.base_price_eur(100, "обычная"), 140)
+        self.assertEqual(m.base_price_eur(1, "обычная"), 140)
         q = m.compute_quote({
             "from_country": "Украина",
             "to_country": "Россия",
             "weight_grams": 500,
             "urgency": "обычная",
         })
-        self.assertEqual(q["price_eur"], 95)
+        self.assertEqual(q["price_eur"], 140)
 
     def test_price_over_envelope_none(self):
         self.assertIsNone(m.base_price_eur(501, "обычная"))
@@ -57,7 +57,7 @@ class TestPricingEta(unittest.TestCase):
     def test_urgent_higher(self):
         urgent = m.base_price_eur(500, "срочная")
         self.assertIsNotNone(urgent)
-        self.assertGreater(urgent, 95)
+        self.assertGreater(urgent, 140)
 
     def test_eta_10_14(self):
         eta = m.eta_working_days("Украина", "Россия")
