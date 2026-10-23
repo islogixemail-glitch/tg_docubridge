@@ -87,15 +87,17 @@ class TestTrackStatuses(unittest.TestCase):
     def test_ordered_pipeline(self):
         expected = [
             "accepted",
-            "departed for hub",
-            "at hub",
-            "destination country",
+            "departed_hub",
+            "at_hub",
+            "destination_country",
             "delivered",
         ]
         self.assertEqual(m.TRACK_STATUSES, expected)
         # indices increase along pipeline
         for i, st in enumerate(expected):
             self.assertEqual(m.track_status_index(st), i)
+        # legacy keys with spaces still map
+        self.assertEqual(m.track_status_index("at hub"), 2)
 
 
 class TestVolumeParse(unittest.TestCase):

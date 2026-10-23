@@ -98,9 +98,8 @@ def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
     try:
         conn = get_conn()
         if not conn:
-            ticket = generate_ticket_candidate()
-            payload["ticket"] = ticket
-            return ticket
+            print("[DB] create_shipment: no DB connection")
+            return None
 
         cur = conn.cursor()
         ticket = None
@@ -132,6 +131,10 @@ def create_shipment(chat_id: int, payload: Dict) -> Optional[str]:
             VALUES (%s, %s, %s)
             """,
             (int(chat_id), psycopg2.extras.Json(payload), ticket),
+        )
+        cur.execute(
+            "INSERT INTO shipment_events (ticket, status, comment) VALUES (%s, 'accepted', NULL)",
+            (ticket,),
         )
         conn.commit()
         cur.close()

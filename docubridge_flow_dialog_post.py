@@ -6,6 +6,7 @@ from telebot.types import ReplyKeyboardRemove
 from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow_steps import *  # noqa: F401,F403
+from docubridge_sheets import export_shipment_async
 
 
 def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
@@ -68,13 +69,23 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
 
         ticket = create_shipment(chat_id, data)
         if not ticket:
-            ticket = generate_ticket_candidate()
-            data["ticket"] = ticket
-            print(f"[Ticket] Fallback ticket {ticket} (DB insert failed)")
-        else:
-            data["ticket"] = ticket
+            print(f"[Ticket] create_shipment failed for chat {chat_id} — no ticket issued")
+            notify_admin_order_failed(chat_id, data)
+            err = (
+                "⚠️ Не удалось сохранить заявку из-за технической ошибки.\n"
+                "Номер отправления не присвоен. Попробуйте ещё раз через несколько минут "
+                f"или напишите менеджеру: {MANAGER_CONTACT}."
+            )
+            save_message(chat_id, s, err)
+            bot.send_message(chat_id, err, reply_markup=confirm_keyboard())
+            return
+        data["ticket"] = ticket
 
         notify_admin_lead(chat_id, data)
+        try:
+            export_shipment_async(chat_id, data, compute_quote(data).get("price_eur"))
+        except Exception as e:  # never break the order
+            print(f"[Sheets] export error: {e}")
 
         thanks = (
             f"✅ Заявка оформлена.\n"

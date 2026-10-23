@@ -94,14 +94,10 @@ def handle_track_ticket(chat_id: int, text: str):
         return
 
     status = row.get("status") or "accepted"
+    status = normalize_status(status) or status
     status_ru = TRACK_STATUS_RU.get(status, status)
     # Pipeline progress
-    lines = [f"Отправление {row['ticket']}", f"Текущий статус: {status_ru}", "", "Этапы:"]
-    cur_idx = track_status_index(status)
-    for i, st in enumerate(TRACK_STATUSES):
-        mark = "✓" if i <= cur_idx else "·"
-        lines.append(f"{mark} {TRACK_STATUS_RU.get(st, st)}")
-    msg = "\n".join(lines)
+    msg = format_track_message(row, get_shipment_events(row["ticket"]))
     save_message(chat_id, text, msg)
     bot.send_message(chat_id, msg, reply_markup=main_menu())
     set_state(chat_id, "greeting", {})
@@ -115,3 +111,41 @@ def contact_manager(chat_id: int):
     save_message(chat_id, None, msg)
     bot.send_message(chat_id, msg, reply_markup=main_menu())
     set_state(chat_id, "greeting", {})
+
+
+def _fmt_dt(dt) -> str:
+    try:
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(dt) if dt else ""
+
+
+def format_track_message(row: Dict, events) -> str:
+    """Stages with dates from shipment_events (latest date per stage)."""
+    status = normalize_status(row.get("status")) or "accepted"
+    dates, comments = {}, {}
+    for ev in events or []:
+        st = normalize_status(ev.get("status"))
+        if not st:
+            continue
+        dates[st] = ev.get("created_at")
+        if ev.get("comment"):
+            comments[st] = ev.get("comment")
+    if "accepted" not in dates and row.get("created_at"):
+        dates["accepted"] = row.get("created_at")
+    lines = [
+        f"Отправление {row['ticket']}",
+        f"Текущий статус: {TRACK_STATUS_RU.get(status, status)}",
+        "",
+        "Этапы:",
+    ]
+    cur_idx = track_status_index(status)
+    for i, st in enumerate(TRACK_STATUSES):
+        mark = "✓" if i <= cur_idx else "·"
+        line = f"{mark} {TRACK_STATUS_RU.get(st, st)}"
+        if i <= cur_idx and dates.get(st):
+            line += f" — {_fmt_dt(dates[st])}"
+        if i <= cur_idx and comments.get(st):
+            line += f" ({comments[st]})"
+        lines.append(line)
+    return "\n".join(lines)

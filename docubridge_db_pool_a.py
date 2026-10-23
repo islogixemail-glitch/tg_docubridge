@@ -162,6 +162,22 @@ def ensure_tables():
             END $$;
             """
         )
+        # Tracking: shipment_events + updated_at on shipments (idempotent)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shipment_events (
+              id BIGSERIAL PRIMARY KEY,
+              ticket TEXT NOT NULL,
+              status TEXT NOT NULL,
+              comment TEXT,
+              created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS shipment_events_ticket_idx
+              ON shipment_events (ticket, created_at);
+            ALTER TABLE shipments
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+            """
+        )
         conn.commit()
         cur.close()
         print("[DB] ensure_tables OK")
