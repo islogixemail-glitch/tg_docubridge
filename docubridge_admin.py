@@ -80,6 +80,10 @@ def apply_status_change(ticket: str, status_raw: str, comment: Optional[str] = N
     ticket = (ticket or "").strip().upper()
     if not is_valid_ticket_format(ticket):
         return False, "Неверный номер. Формат: DB1234"
+    if not comment:
+        current = get_shipment_by_ticket(ticket)
+        if current and normalize_status(current.get("status")) == status:
+            return True, f"ℹ️ {current['ticket']} уже в этом статусе: «{TRACK_STATUS_RU[status]}»."
     row = update_shipment_status(ticket, status, comment)
     if not row:
         return False, f"Не удалось обновить {ticket} (не найдено или ошибка БД)."
@@ -140,7 +144,7 @@ def admin_status(message):
 
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith(STATUS_CB_PREFIX + ":"))
 def admin_status_button(call):
-    if not is_admin(call.message.chat.id if call.message else call.from_user.id):
+    if not is_admin(getattr(call.from_user, "id", None)):
         bot.answer_callback_query(call.id, "Нет доступа")
         return
     try:

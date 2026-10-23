@@ -113,6 +113,7 @@ class TestStatusChange(AdminBase):
 
     def test_inline_button(self):
         upd = dict(ROW, status="delivered")
+        mock.patch.object(adm, "get_shipment_by_ticket", return_value=ROW).start()
         ans = mock.patch.object(m.bot, "answer_callback_query").start()
         call = SimpleNamespace(id="1", data="st:DB1234:delivered",
                                message=SimpleNamespace(chat=SimpleNamespace(id=ADMIN)),
@@ -131,6 +132,42 @@ class TestStatusChange(AdminBase):
             adm.admin_status_button(call)
         us.assert_not_called()
         self.assertIn("Нет доступа", ans.call_args[0][1])
+
+    def test_inline_button_checks_from_user_not_chat(self):
+        ans = mock.patch.object(m.bot, "answer_callback_query").start()
+        # admin chat, but pressed by a non-admin member -> denied
+        call = SimpleNamespace(id="1", data="st:DB1234:delivered",
+                               message=SimpleNamespace(chat=SimpleNamespace(id=ADMIN)),
+                               from_user=SimpleNamespace(id=555))
+        with mock.patch.object(adm, "update_shipment_status") as us:
+            adm.admin_status_button(call)
+        us.assert_not_called()
+        self.assertIn("Нет доступа", ans.call_args[0][1])
+
+    def test_same_status_no_comment_is_noop(self):
+        with mock.patch.object(adm, "get_shipment_by_ticket", return_value=ROW), \
+             mock.patch.object(adm, "update_shipment_status") as us:
+            ok, text = adm.apply_status_change("DB1234", "accepted")
+        self.assertTrue(ok)
+        self.assertIn("уже в этом статусе", text)
+        us.assert_not_called()
+        self.send.assert_not_called()
+        self.sheet.assert_not_called()
+
+    def test_same_status_legacy_key_is_noop(self):
+        with mock.patch.object(adm, "get_shipment_by_ticket", return_value=dict(ROW, status="at hub")), \
+             mock.patch.object(adm, "update_shipment_status") as us:
+            ok, text = adm.apply_status_change("DB1234", "at_hub")
+        us.assert_not_called()
+        self.assertIn("уже в этом статусе", text)
+
+    def test_same_status_with_comment_updates(self):
+        upd = dict(ROW)
+        with mock.patch.object(adm, "get_shipment_by_ticket", return_value=ROW), \
+             mock.patch.object(adm, "update_shipment_status", return_value=upd) as us:
+            ok, _ = adm.apply_status_change("DB1234", "accepted", "трек 99")
+        us.assert_called_once_with("DB1234", "accepted", "трек 99")
+        self.assertEqual(self.send.call_args_list[0][0][0], 555)
 
     def test_keyboard_buttons(self):
         kb = kbm.status_inline_keyboard("DB1234")
