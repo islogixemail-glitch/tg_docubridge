@@ -8,6 +8,8 @@ from flask import request
 from docubridge_runtime import *  # noqa: F401,F403
 from docubridge_keyboards import *  # noqa: F401,F403
 from docubridge_flow import *  # noqa: F401,F403
+import docubridge_admin as _admin  # noqa: F401  (registers admin handlers before catch-all)
+from docubridge_admin import *  # noqa: F401,F403
 
 # ------------ Handlers ------------
 

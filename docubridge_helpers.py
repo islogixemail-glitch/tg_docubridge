@@ -65,19 +65,32 @@ def resolve_start_payload(payload: Optional[str]) -> Dict:
 # Display labels (RU) ↔ internal status keys
 TRACK_STATUSES: List[str] = [
     "accepted",
-    "departed for hub",
-    "at hub",
-    "destination country",
+    "departed_hub",
+    "at_hub",
+    "destination_country",
     "delivered",
 ]
 
 TRACK_STATUS_RU = {
     "accepted": "принято",
-    "departed for hub": "отправлено в хаб",
-    "at hub": "на хабе",
-    "destination country": "в стране назначения",
+    "departed_hub": "отправлено в хаб",
+    "at_hub": "на хабе",
+    "destination_country": "в стране назначения",
     "delivered": "доставлено",
 }
+
+
+def normalize_status(status: Optional[str]) -> Optional[str]:
+    """Map legacy keys ('at hub') / RU labels to canonical keys; None if unknown."""
+    if not status:
+        return None
+    s = str(status).strip().lower().replace(" ", "_").replace("-", "_")
+    if s in TRACK_STATUSES:
+        return s
+    for k, ru in TRACK_STATUS_RU.items():
+        if ru.replace(" ", "_") == s:
+            return k
+    return None
 
 # Envelope floor: ≤500 g ordinary → €140; urgent higher; over 0.5 kg → по согласованию
 PRICE_ORDINARY_EUR = 140
@@ -221,7 +234,7 @@ def generate_ticket_candidate() -> str:
 
 def track_status_index(status: str) -> int:
     try:
-        return TRACK_STATUSES.index(status)
+        return TRACK_STATUSES.index(normalize_status(status) or status)
     except ValueError:
         return 0
 

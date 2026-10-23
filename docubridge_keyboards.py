@@ -2,7 +2,13 @@
 """DocuBridge keyboards and quote formatting — Phase 2."""
 from datetime import datetime, timezone
 from typing import Optional, Dict
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telebot.types import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 from docubridge_runtime import *  # noqa: F401,F403
 
@@ -109,6 +115,24 @@ def format_confirm_summary(data: Dict) -> str:
     )
 
 
+STATUS_CB_PREFIX = "st"
+
+
+def status_inline_keyboard(ticket: str) -> InlineKeyboardMarkup:
+    """Inline buttons for admin: callback_data = st:<ticket>:<status>."""
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        *[
+            InlineKeyboardButton(
+                TRACK_STATUS_RU[st].capitalize(),
+                callback_data=f"{STATUS_CB_PREFIX}:{ticket}:{st}",
+            )
+            for st in TRACK_STATUSES
+        ]
+    )
+    return kb
+
+
 def notify_admin_lead(source_chat_id: int, payload: Dict):
     """Manager card — plain text to avoid Markdown parse breaks."""
     if not ADMIN_CHAT_ID:
@@ -149,6 +173,27 @@ def notify_admin_lead(source_chat_id: int, payload: Dict):
             f"Имя: {payload.get('name', '—')}",
             f"Телефон: {payload.get('phone', '—')}",
         ]
-        bot.send_message(ADMIN_CHAT_ID, "\n".join(lines))
+        ticket = payload.get("ticket")
+        markup = status_inline_keyboard(ticket) if ticket else None
+        bot.send_message(ADMIN_CHAT_ID, "\n".join(lines), reply_markup=markup)
     except Exception as e:
         print(f"[ADMIN notify] error: {e}")
+
+
+def notify_admin_order_failed(source_chat_id: int, payload: Dict):
+    """Alert admin that a confirmed order could not be saved (no ticket issued)."""
+    if not ADMIN_CHAT_ID:
+        print("[ADMIN] ADMIN_CHAT_ID не задан — уведомление об ошибке не отправлено")
+        return
+    try:
+        lines = [
+            "⚠️ Ошибка сохранения заявки (номер клиенту НЕ выдан)",
+            f"Chat ID: {source_chat_id}",
+            f"Маршрут: {route_line(payload)}",
+            f"Имя: {payload.get('name', '—')}",
+            f"Телефон: {payload.get('phone', '—')}",
+            "Проверьте БД и свяжитесь с клиентом.",
+        ]
+        bot.send_message(ADMIN_CHAT_ID, "\n".join(lines))
+    except Exception as e:
+        print(f"[ADMIN notify failed-order] error: {e}")
