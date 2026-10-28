@@ -110,7 +110,11 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         if "отслед" in low or "трек" in low or "status" in low:
             start_track_flow(chat_id)
             return
-        reply = ai_reply(s)
+        reply = (ai_reply(s) or "").strip() if looks_like_question(s) else ""
+        if not reply or reply.lower().startswith(("ошибка", "error")):
+            reply = FALLBACK_TEXT
+        else:
+            reply += "\n\nМеню: /start, справка: /help."
         save_message(chat_id, s, reply)
         bot.send_message(chat_id, reply, reply_markup=main_menu())
         return

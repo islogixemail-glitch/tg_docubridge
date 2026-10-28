@@ -35,6 +35,71 @@ START_PAYLOAD_ROUTES = {
 }
 
 
+HUB_CB_PREFIX = "hub"
+KNOWN_COMMANDS = {"start", "help", "track", "menu", "reset", "ai", "orders", "order", "status"}
+BOTFATHER_COMMANDS = [
+    ("start", "Главное меню и выбор маршрута"),
+    ("help", "Справка: что делает бот и как получить расчёт"),
+    ("track", "Отследить отправление по номеру DBxxxx"),
+    ("menu", "Вернуться в главное меню"),
+]
+
+HELP_TEXT = (
+    "DocuBridge — доставка бумажных документов по маршрутам:\n"
+    "• Украина → Россия\n"
+    "• Украина → Беларусь\n"
+    "• Россия → Украина\n"
+    "• Беларусь → Украина\n\n"
+    "Как получить расчёт:\n"
+    "1. Нажмите /start и выберите маршрут.\n"
+    "2. Укажите города, тип документа, вес или число листов и срочность.\n"
+    "3. Бот сразу покажет ориентировочную цену и срок. Контакты — только если решите оформить заявку.\n\n"
+    "Отслеживание: /track и номер DBxxxx.\n\n"
+    "Не принимаем: паспорта, ID-карты, военные билеты и другие документы, удостоверяющие личность.\n\n"
+    "Команды: /start — меню, /help — справка, /track — отслеживание, /menu — главное меню."
+)
+
+FALLBACK_TEXT = (
+    "Извините, я не понял сообщение.\n"
+    "Выберите действие в меню ниже или нажмите /start (выбор маршрута) или /help (справка)."
+)
+
+
+def command_name(text: Optional[str]) -> Optional[str]:
+    """'/Help@islogix_bot arg' -> 'help'; None if not a command."""
+    s = (text or "").strip()
+    if not s.startswith("/") or len(s) < 2:
+        return None
+    return s[1:].split(maxsplit=1)[0].split("@", 1)[0].lower()
+
+
+def is_unknown_command(text: Optional[str]) -> bool:
+    name = command_name(text)
+    return name is not None and name not in KNOWN_COMMANDS
+
+
+def looks_like_question(text: Optional[str]) -> bool:
+    """Heuristic: real question worth sending to AI vs. gibberish."""
+    s = (text or "").strip()
+    words = re.findall(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ]{2,}", s)
+    if len(words) < 2:
+        return False
+    vowels = set("аеёиоуыэюяіїєaeiouy")
+    letters = [c for c in s.lower() if c.isalpha()]
+    return bool(letters) and sum(c in vowels for c in letters) / len(letters) >= 0.2
+
+
+def hub_callback_data(route_key: str) -> str:
+    return f"{HUB_CB_PREFIX}:{route_key}"
+
+
+def parse_hub_callback(data: Optional[str]) -> Optional[Tuple[str, str]]:
+    s = data or ""
+    if not s.startswith(HUB_CB_PREFIX + ":"):
+        return None
+    return START_PAYLOAD_ROUTES.get(s.split(":", 1)[1])
+
+
 def normalize_start_payload(payload: Optional[str]) -> str:
     return (payload or "").strip().lower()
 

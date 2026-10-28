@@ -34,25 +34,49 @@ def start(message):
         data["ref"] = ref
         data["start_payload"] = ref
     set_state(message.chat.id, "greeting", data)
+    send_hub(message.chat.id, from_showcase=bool(ref and action.get("kind") == "menu"))
 
-    if action.get("kind") == "menu" and ref:
-        msg = (
-            "Вы пришли с витрины DocuBridge.\n"
-            "Выберите: отправить документы, получить документы или другой пункт меню."
-        )
-    else:
-        msg = (
-            "Добро пожаловать в DocuBridge!\n\n"
-            "Международная доставка документов по маршрутам:\n"
-            "• Украина → Россия\n"
-            "• Украина → Беларусь\n"
-            "• Россия → Украина\n"
-            "• Беларусь → Украина\n\n"
-            "Сначала покажем ориентировочную цену и срок — контакты только если решите оформить заявку.\n"
-            "Выберите действие в меню:"
-        )
-    save_message(message.chat.id, "/start", msg)
-    bot.send_message(message.chat.id, msg, reply_markup=main_menu())
+
+def send_hub(chat_id: int, from_showcase: bool = False):
+    head = "Вы пришли с витрины DocuBridge.\n\n" if from_showcase else ""
+    msg = (
+        head
+        + "Добро пожаловать в DocuBridge! Доставляем бумажные документы "
+        "между Украиной, Россией и Беларусью.\n\n"
+        "Сначала покажем ориентировочную цену и срок — контакты только если решите оформить заявку.\n"
+        "Выберите маршрут:"
+    )
+    save_message(chat_id, "/start", msg)
+    bot.send_message(chat_id, msg, reply_markup=hub_inline_keyboard())
+    bot.send_message(
+        chat_id,
+        "Или выберите действие в меню ниже. Справка — /help.",
+        reply_markup=main_menu(),
+    )
+
+
+def send_fallback(chat_id: int):
+    save_message(chat_id, None, FALLBACK_TEXT)
+    bot.send_message(chat_id, FALLBACK_TEXT, reply_markup=main_menu())
+
+
+@bot.message_handler(commands=["help"])
+def help_cmd(message):
+    save_message(message.chat.id, "/help", HELP_TEXT)
+    bot.send_message(message.chat.id, HELP_TEXT, reply_markup=main_menu())
+
+
+@bot.callback_query_handler(func=lambda c: parse_hub_callback(c.data) is not None)
+def hub_route_cb(call):
+    fc, tc = parse_hub_callback(call.data)
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"[hub] answer_callback_query failed: {e}")
+    chat_id = call.message.chat.id
+    _, data = get_state(chat_id)
+    start_send_flow(chat_id, role="sender", ref=(data or {}).get("ref"),
+                    from_country=fc, to_country=tc)
 
 
 @bot.message_handler(commands=["track"])
@@ -74,6 +98,9 @@ def ai_ping(message):
 
 @bot.message_handler(func=lambda m: True)
 def any_text(message):
+    if is_unknown_command(message.text):
+        send_fallback(message.chat.id)
+        return
     handle_answer(message.chat.id, message.text or "")
 
 

@@ -22,6 +22,13 @@ def main_menu() -> ReplyKeyboardMarkup:
     return kb
 
 
+def hub_inline_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    for key, (fc, tc) in START_PAYLOAD_ROUTES.items():
+        kb.add(InlineKeyboardButton(f"{fc} → {tc}", callback_data=hub_callback_data(key)))
+    return kb
+
+
 def route_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for label in ROUTE_LABELS:
