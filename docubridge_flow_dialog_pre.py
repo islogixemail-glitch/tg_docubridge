@@ -80,17 +80,17 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
         bot.send_message(
             chat_id,
             f"Какой тип документа?\n(например: {DOC_TYPES_HINT})\n"
-            "Важно: паспорта и ID-карты не принимаем.",
+            "Важно: паспорта, ID-карты и военные билеты не принимаем.",
         )
         return True
 
     if state == "ask_doc_type":
         low = s.lower()
-        banned = ["паспорт", "passport", "id-карт", "id карт", "удостоверен", "national id"]
+        banned = ["паспорт", "passport", "id-карт", "id карт", "удостоверен", "national id", "военн", "военник"]
         if any(b in low for b in banned):
             bot.send_message(
                 chat_id,
-                "Паспорта, ID-карты и подобные оригиналы не принимаем. "
+                "Паспорта, ID-карты, военные билеты и подобные оригиналы не принимаем. "
                 "Укажите другой тип документа (доверенность, диплом, свидетельство и т.п.).",
             )
             return True
