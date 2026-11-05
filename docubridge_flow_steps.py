@@ -31,13 +31,7 @@ def start_send_flow(
     if fc and tc and is_allowed_route(fc, tc):
         data["from_country"] = fc
         data["to_country"] = tc
-        set_state(chat_id, "ask_from_city", data)
-        msg = (
-            f"Маршрут: {fc} → {tc}.\n"
-            "Из какого города отправляем?"
-        )
-        save_message(chat_id, None, msg)
-        bot.send_message(chat_id, msg, reply_markup=ReplyKeyboardRemove())
+        show_route_offer(chat_id, data)
         return
     set_state(chat_id, "choose_route", data)
     role_ru = "получателя" if role == "receiver" else "отправителя"
@@ -49,7 +43,25 @@ def start_send_flow(
     bot.send_message(chat_id, msg, reply_markup=route_keyboard())
 
 
-def show_allowed_docs(chat_id: int):
+def show_route_offer(chat_id: int, data: Dict[str, Any]):
+    """First message on a route: offer + «от €140» + ban list, then «Рассчитать точно»."""
+    set_state(chat_id, "route_offer", data)
+    msg = route_offer_text(data["from_country"], data["to_country"])
+    save_message(chat_id, None, msg)
+    bot.send_message(chat_id, msg, reply_markup=offer_keyboard())
+
+
+def ask_doc_type(chat_id: int, data: Dict[str, Any]):
+    set_state(chat_id, "ask_doc_type", data)
+    bot.send_message(
+        chat_id,
+        "1/2. Какой документ отправляем? Выберите кнопкой или «Другое».\n"
+        "Паспорта, ID-карты и военные билеты не принимаем.",
+        reply_markup=doc_type_keyboard(),
+    )
+
+
+def show_allowed_docs(chat_id: int, reply_markup=None):
     # Prefer plain text version if Markdown fails — send with Markdown first carefully
     text = (
         "Что можно отправлять\n\n"
@@ -64,7 +76,7 @@ def show_allowed_docs(chat_id: int):
         "личности и аналогичные оригиналы документов, удостоверяющих личность."
     )
     save_message(chat_id, None, text)
-    bot.send_message(chat_id, text, reply_markup=main_menu())
+    bot.send_message(chat_id, text, reply_markup=reply_markup or main_menu())
 
 
 def start_track_flow(chat_id: int):

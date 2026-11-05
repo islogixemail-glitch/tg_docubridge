@@ -96,6 +96,20 @@ def ai_ping(message):
     bot.send_message(message.chat.id, f"AI: {reply}")
 
 
+@bot.message_handler(content_types=["contact"])
+def contact_shared(message):
+    """Telegram request_contact button on the phone step."""
+    contact = getattr(message, "contact", None)
+    phone = getattr(contact, "phone_number", "") or ""
+    state, _ = get_state(message.chat.id)
+    if state != "ask_phone" or not phone:
+        send_fallback(message.chat.id)
+        return
+    if not phone.startswith("+"):
+        phone = "+" + phone.lstrip("0")
+    handle_answer(message.chat.id, phone)
+
+
 @bot.message_handler(func=lambda m: True)
 def any_text(message):
     if is_unknown_command(message.text):

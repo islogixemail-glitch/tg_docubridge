@@ -14,10 +14,11 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
 
     if state == "quote_shown":
         if s == BTN_APPLY or s.lower() in {"оформить", "заявка", "да"}:
-            set_state(chat_id, "ask_name", data)
+            set_state(chat_id, "ask_from_city", data)
             bot.send_message(
                 chat_id,
-                "Как к вам обращаться (имя/фамилия)?",
+                f"Оформляем заявку ({data.get('from_country')} → {data.get('to_country')}).\n"
+                "Из какого города отправляем?",
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
@@ -32,6 +33,9 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
         return
 
     if state == "ask_name":
+        if is_step_question(s):
+            bot.send_message(chat_id, step_question_answer() + "\n\nКак к вам обращаться?")
+            return
         if not valid_name(s):
             bot.send_message(
                 chat_id,
@@ -40,13 +44,26 @@ def handle_answer_post(chat_id: int, text: str, state: str, data: Dict) -> None:
             return
         data["name"] = s
         set_state(chat_id, "ask_phone", data)
-        bot.send_message(chat_id, "Контактный телефон (+380 / +7 / +375):")
+        bot.send_message(
+            chat_id,
+            "Контактный телефон: нажмите «Поделиться контактом» или введите номер "
+            "в международном формате (+код страны и номер, например +380…, +36…, +421…).",
+            reply_markup=phone_keyboard(),
+        )
         return
 
     if state == "ask_phone":
-        phone = s.replace(" ", "").replace("-", "")
+        if s == BTN_MENU:
+            go_menu(chat_id)
+            return
+        phone = normalize_phone(s)
         if not valid_phone(phone):
-            bot.send_message(chat_id, "Телефон должен начинаться с +380 / +7 / +375.")
+            bot.send_message(
+                chat_id,
+                "Нужен номер в формате +код страны и номер (8–15 цифр), "
+                "или нажмите «Поделиться контактом».",
+                reply_markup=phone_keyboard(),
+            )
             return
         data["phone"] = phone
         set_state(chat_id, "confirm", data)

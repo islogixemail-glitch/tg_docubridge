@@ -81,16 +81,18 @@ class TestStart(Base):
             self.sent.clear()
             h.start(msg(f"/start {key}"))
             st, data = self.states[CHAT]
-            self.assertEqual(st, "ask_from_city")
+            self.assertEqual(st, "route_offer")
             self.assertEqual((data["from_country"], data["to_country"]), (fc, tc))
             self.assertIn(f"Маршрут: {fc} → {tc}", self.texts())
+            self.assertIn("от €140", self.texts())
+            self.assertNotIn("Из какого города", self.texts())
 
     def test_hub_button_enters_route(self):
         h.start(msg("/start dokumenty"))
         call = SimpleNamespace(id="1", data="hub:by_ua", message=msg(""), from_user=SimpleNamespace(id=CHAT))
         h.hub_route_cb(call)
         st, data = self.states[CHAT]
-        self.assertEqual(st, "ask_from_city")
+        self.assertEqual(st, "route_offer")
         self.assertEqual(data["to_country"], "Украина")
         self.assertEqual(data["ref"], "dokumenty")
 
@@ -133,14 +135,14 @@ class TestHelpFallback(Base):
 
     def test_quote_flow_intact(self):
         h.start(msg("/start ua_ru"))
-        for t in ("Киев", "Москва", "диплом", "300 г", "обычная"):
+        for t in ("Рассчитать точно", "Диплом / аттестат", "до 300 г"):
             h.any_text(msg(t))
         self.assertEqual(self.states[CHAT][0], "quote_shown")
         self.assertIn("€140", self.texts())
 
     def test_military_id_rejected(self):
         h.start(msg("/start ua_by"))
-        for t in ("Киев", "Минск", "военный билет"):
+        for t in ("Рассчитать точно", "военный билет"):
             h.any_text(msg(t))
         self.assertEqual(self.states[CHAT][0], "ask_doc_type")
         self.assertIn("военные билеты", self.sent[-1][0])

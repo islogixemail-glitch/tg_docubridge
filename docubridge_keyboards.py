@@ -44,6 +44,35 @@ def urgency_keyboard() -> ReplyKeyboardMarkup:
     return kb
 
 
+def offer_keyboard() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(KeyboardButton(BTN_CALC))
+    kb.add(KeyboardButton(MENU_ALLOWED))
+    kb.add(KeyboardButton(BTN_MENU))
+    return kb
+
+
+def doc_type_keyboard() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
+    kb.add(*[KeyboardButton(t) for t in DOC_TYPE_BUTTONS])
+    kb.add(KeyboardButton(BTN_MENU))
+    return kb
+
+
+def volume_keyboard() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=2)
+    kb.add(*[KeyboardButton(t) for t in VOLUME_PRESETS])
+    kb.add(KeyboardButton(BTN_MENU))
+    return kb
+
+
+def phone_keyboard() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(KeyboardButton(BTN_SHARE_CONTACT, request_contact=True))
+    kb.add(KeyboardButton(BTN_MENU))
+    return kb
+
+
 def quote_keyboard() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(KeyboardButton(BTN_APPLY))
@@ -63,6 +92,8 @@ def role_label(role: str) -> str:
 
 
 def route_line(data: Dict) -> str:
+    if not data.get("from_city") and not data.get("to_city"):
+        return f"{data.get('from_country')} → {data.get('to_country')}"
     return (
         f"{data.get('from_country')}/{data.get('from_city')} → "
         f"{data.get('to_country')}/{data.get('to_city')}"
@@ -96,11 +127,12 @@ def format_quote_message(data: Dict) -> str:
         f"Маршрут: {route_line(data)}\n"
         f"Тип документа: {data.get('doc_type', '—')}\n"
         f"Объём: {vol_line}\n"
-        f"Срочность: {data.get('urgency', '—')}\n\n"
+        "\n"
         f"{price_line}\n"
         f"{eta_line}"
         f"{notes}\n\n"
-        "Контакты пока не нужны. Нажмите «Оформить заявку», чтобы продолжить, "
+        "Цена от городов не зависит. Контакты пока не нужны. "
+        "Нажмите «Оформить заявку» — уточним города и контакт для карточки заказа, "
         "или «В меню»."
     )
 
@@ -114,7 +146,6 @@ def format_confirm_summary(data: Dict) -> str:
         f"Маршрут: {route_line(data)}\n"
         f"Документ: {data.get('doc_type')}\n"
         f"Объём: {data.get('pages_a4') or '—'} л. / ≈ {data.get('weight_grams') or 0} г\n"
-        f"Срочность: {data.get('urgency')}\n"
         f"Оценка: {price}; срок {q.get('eta_working') or '—'} раб. дней\n"
         f"Имя: {data.get('name')}\n"
         f"Телефон: {data.get('phone')}\n\n"

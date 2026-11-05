@@ -25,7 +25,10 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
         start_track_flow(chat_id)
         return True
     if s == MENU_ALLOWED:
-        show_allowed_docs(chat_id)
+        if state == "route_offer":
+            show_allowed_docs(chat_id, reply_markup=offer_keyboard())
+        else:
+            show_allowed_docs(chat_id)
         return True
     if s == MENU_MANAGER:
         contact_manager(chat_id)
@@ -54,80 +57,103 @@ def handle_answer_pre(chat_id: int, text: str, state: str, data: Dict) -> bool:
             return True
         data["from_country"] = fc
         data["to_country"] = tc
-        set_state(chat_id, "ask_from_city", data)
-        bot.send_message(
-            chat_id,
-            f"Маршрут: {fc} → {tc}.\nИз какого города отправляем?",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        show_route_offer(chat_id, data)
         return True
 
-    if state == "ask_from_city":
-        if len(s) < 2:
-            bot.send_message(chat_id, "Укажите город отправки.")
+    if state == "route_offer":
+        low = s.lower()
+        if s == BTN_CALC or "рассчит" in low or "расчет" in low or "расчёт" in low or low in {"да", "ок", "ok"}:
+            ask_doc_type(chat_id, data)
             return True
-        data["from_city"] = s.title()
-        set_state(chat_id, "ask_to_city", data)
-        bot.send_message(chat_id, "В какой город доставляем?")
-        return True
-
-    if state == "ask_to_city":
-        if len(s) < 2:
-            bot.send_message(chat_id, "Укажите город доставки.")
-            return True
-        data["to_city"] = s.title()
-        set_state(chat_id, "ask_doc_type", data)
+        reply = step_question_answer() if is_step_question(s) else ""
         bot.send_message(
             chat_id,
-            f"Какой тип документа?\n(например: {DOC_TYPES_HINT})\n"
-            "Важно: паспорта, ID-карты и военные билеты не принимаем.",
+            (reply + "\n\n" if reply else "") + "Нажмите «Рассчитать точно», чтобы получить цену.",
+            reply_markup=offer_keyboard(),
         )
         return True
 
     if state == "ask_doc_type":
-        low = s.lower()
-        banned = ["паспорт", "passport", "id-карт", "id карт", "удостоверен", "national id", "военн", "военник"]
-        if any(b in low for b in banned):
+        if is_banned_doc(s):
             bot.send_message(
                 chat_id,
                 "Паспорта, ID-карты, военные билеты и подобные оригиналы не принимаем. "
-                "Укажите другой тип документа (доверенность, диплом, свидетельство и т.п.).",
+                "Выберите другой тип документа.",
+                reply_markup=doc_type_keyboard(),
+            )
+            return True
+        if s == DOC_OTHER:
+            data["doc_other"] = True
+            set_state(chat_id, "ask_doc_type", data)
+            bot.send_message(
+                chat_id,
+                f"Напишите, какой документ (например: {DOC_TYPES_HINT}).",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return True
+        if is_step_question(s):
+            bot.send_message(
+                chat_id,
+                step_question_answer() + "\n\nКакой документ отправляем?",
+                reply_markup=doc_type_keyboard(),
             )
             return True
         if len(s) < 2:
-            bot.send_message(chat_id, "Укажите тип документа.")
+            bot.send_message(chat_id, "Укажите тип документа.", reply_markup=doc_type_keyboard())
             return True
+        data.pop("doc_other", None)
         data["doc_type"] = s
         set_state(chat_id, "ask_volume", data)
         bot.send_message(
             chat_id,
-            "Укажите объём: вес в граммах (конверт до 500 г) и/или число листов A4.\n"
-            "Примеры: «300 г», «40 листов», «0.4 кг».",
+            "2/2. Примерный вес конверта? Выберите кнопкой "
+            "(или напишите: «300 г», «40 листов»). ~1 лист A4 ≈ 6 г.",
+            reply_markup=volume_keyboard(),
         )
         return True
 
     if state == "ask_volume":
-        pages, weight, err = parse_volume(s)
-        if err:
-            bot.send_message(chat_id, err)
+        if s in VOLUME_PRESETS:
+            pages, weight, err = None, VOLUME_PRESETS[s], None
+        elif is_step_question(s) and not any(ch.isdigit() for ch in s):
+            bot.send_message(
+                chat_id,
+                step_question_answer() + "\n\nВыберите вес кнопкой.",
+                reply_markup=volume_keyboard(),
+            )
             return True
+        else:
+            pages, weight, err = parse_volume(s)
+        if err:
+            bot.send_message(chat_id, err, reply_markup=volume_keyboard())
+            return True
+        data.pop("pages_a4", None)
         if pages is not None:
             data["pages_a4"] = pages
         data["weight_grams"] = weight
-        set_state(chat_id, "ask_urgency", data)
-        bot.send_message(chat_id, "Срочность доставки?", reply_markup=urgency_keyboard())
-        return True
-
-    if state == "ask_urgency":
-        u = infer_urgency(s) or (s.lower() if s.lower() in {"обычная", "срочная"} else None)
-        if not u:
-            bot.send_message(chat_id, "Выберите: обычная или срочная.", reply_markup=urgency_keyboard())
-            return True
-        data["urgency"] = u
+        data["urgency"] = "обычная"
         set_state(chat_id, "quote_shown", data)
         msg = format_quote_message(data)
         save_message(chat_id, None, msg)
         bot.send_message(chat_id, msg, reply_markup=quote_keyboard())
+        return True
+
+    if state in {"ask_from_city", "ask_to_city"}:
+        prompt = "Из какого города отправляем?" if state == "ask_from_city" else "В какой город доставляем?"
+        if is_step_question(s):
+            bot.send_message(chat_id, step_question_answer() + "\n\n" + prompt)
+            return True
+        if len(s) < 2 or not any(ch.isalpha() for ch in s):
+            bot.send_message(chat_id, "Укажите город. " + prompt)
+            return True
+        if state == "ask_from_city":
+            data["from_city"] = s.title()
+            set_state(chat_id, "ask_to_city", data)
+            bot.send_message(chat_id, "В какой город доставляем?")
+            return True
+        data["to_city"] = s.title()
+        set_state(chat_id, "ask_name", data)
+        bot.send_message(chat_id, "Как к вам обращаться (имя/фамилия)?")
         return True
 
     return False

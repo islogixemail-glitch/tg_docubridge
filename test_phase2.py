@@ -54,10 +54,9 @@ class TestPricingEta(unittest.TestCase):
         self.assertIsNone(m.base_price_eur(501, "обычная"))
         self.assertIsNone(m.base_price_eur(1000, "срочная"))
 
-    def test_urgent_higher(self):
-        urgent = m.base_price_eur(500, "срочная")
-        self.assertIsNotNone(urgent)
-        self.assertGreater(urgent, 140)
+    def test_no_urgent_tariff(self):
+        self.assertEqual(m.base_price_eur(500, "срочная"), 140)
+        self.assertFalse(hasattr(m, "PRICE_URGENT_EUR"))
 
     def test_eta_10_14(self):
         eta = m.eta_working_days("Украина", "Россия")
