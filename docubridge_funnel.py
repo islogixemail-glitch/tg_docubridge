@@ -140,8 +140,10 @@ def _after_value(chat_id: int, data: Dict, next_state: str) -> None:
     prompt_step(chat_id, next_state, data)
 
 
-def _off_step_answer(s: str) -> str:
-    """Short answer to a question typed on a data step (we then re-ask the step)."""
+def _off_step_answer(s: str, chat_id: Optional[int] = None, state: Optional[str] = None,
+                     data: Optional[Dict] = None) -> str:
+    """Short answer to a question typed on a data step (we then re-ask the step).
+    If the AI cannot answer, the operator gets a «нужен человек» card."""
     low = s.lower()
     if any(w in low for w in STEP_QUESTION_WORDS):
         return step_question_answer()
@@ -151,8 +153,15 @@ def _off_step_answer(s: str) -> str:
             reply = (ai_reply(s) or "").strip()
         except Exception as e:  # never break the funnel
             print(f"[Funnel] ai_reply error: {e}")
-    if not reply or reply.lower().startswith(("ошибка", "error", "небольшая пауза", "сейчас умные")):
-        reply = f"На этот вопрос подробно ответит менеджер: {MANAGER_CONTACT}."
+    if not reply or reply.lower().startswith(AI_FAIL_PREFIXES):
+        import docubridge_lang as lang_mod
+        from docubridge_texts import t as tr
+        lang = lang_mod.get_lang(chat_id) if chat_id is not None else "ru"
+        import docubridge_payment_config as pcfg
+        reply = tr("ho_question_step", lang, manager=MANAGER_CONTACT, rt=pcfg.RESPONSE_TIME[lang])
+        if chat_id is not None and looks_like_question(s):
+            from docubridge_handoff import request_handoff  # lazy: handoff imports this module
+            request_handoff(chat_id, "question", s, state, data)
     return reply[:700]
 
 
@@ -193,7 +202,7 @@ def handle_funnel(chat_id: int, text: str, state: str, data: Dict) -> bool:
             prompt_step(chat_id, "ask_doc_type", data)
             return True
         if is_step_question(s):
-            prompt_step(chat_id, state, data, prefix=_off_step_answer(s))
+            prompt_step(chat_id, state, data, prefix=_off_step_answer(s, chat_id, state, data))
             return True
         if len(s) < 2:
             prompt_step(chat_id, state, data, prefix="Укажите тип документа.")
@@ -207,7 +216,7 @@ def handle_funnel(chat_id: int, text: str, state: str, data: Dict) -> bool:
         if s in VOLUME_PRESETS:
             pages, weight, err = None, VOLUME_PRESETS[s], None
         elif is_step_question(s) and not any(ch.isdigit() for ch in s):
-            prompt_step(chat_id, state, data, prefix=_off_step_answer(s))
+            prompt_step(chat_id, state, data, prefix=_off_step_answer(s, chat_id, state, data))
             return True
         else:
             pages, weight, err = parse_volume(s)
@@ -230,7 +239,7 @@ def handle_funnel(chat_id: int, text: str, state: str, data: Dict) -> bool:
             prompt_step(chat_id, "ask_from_city", data)
             return True
         if is_step_question(s):
-            prompt_step(chat_id, state, data, prefix=_off_step_answer(s))
+            prompt_step(chat_id, state, data, prefix=_off_step_answer(s, chat_id, state, data))
             return True
         bot.send_message(chat_id, "Нажмите «Оформить заявку» или «← Назад».", reply_markup=quote_keyboard())
         return True
@@ -240,7 +249,7 @@ def handle_funnel(chat_id: int, text: str, state: str, data: Dict) -> bool:
             bot.send_message(chat_id, "Напишите название города сообщением.")
             return True
         if is_step_question(s):
-            prompt_step(chat_id, state, data, prefix=_off_step_answer(s))
+            prompt_step(chat_id, state, data, prefix=_off_step_answer(s, chat_id, state, data))
             return True
         if len(s) < 2 or not any(ch.isalpha() for ch in s):
             prompt_step(chat_id, state, data, prefix="Укажите город.")
@@ -260,7 +269,7 @@ def handle_funnel(chat_id: int, text: str, state: str, data: Dict) -> bool:
         if s.startswith(NAME_BTN_PREFIX):
             s = s[len(NAME_BTN_PREFIX):].strip()
         elif is_step_question(s):
-            prompt_step(chat_id, state, data, prefix=_off_step_answer(s))
+            prompt_step(chat_id, state, data, prefix=_off_step_answer(s, chat_id, state, data))
             return True
         if not valid_name(s):
             print(f"[Funnel] chat={chat_id} name rejected: {mask_name(s)!r} (len {len(s)})")
@@ -276,7 +285,7 @@ def handle_funnel(chat_id: int, text: str, state: str, data: Dict) -> bool:
         phone = normalize_phone(s)
         if not valid_phone(phone):
             if is_step_question(s) and not any(ch.isdigit() for ch in s):
-                prompt_step(chat_id, state, data, prefix=_off_step_answer(s))
+                prompt_step(chat_id, state, data, prefix=_off_step_answer(s, chat_id, state, data))
                 return True
             print(f"[Funnel] chat={chat_id} phone rejected: {mask_phone(s)!r} (digits {sum(c.isdigit() for c in s)})")
             bot.send_message(chat_id, PHONE_HELP, reply_markup=phone_keyboard())

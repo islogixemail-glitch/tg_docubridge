@@ -172,7 +172,7 @@ class TestStatusChange(AdminBase):
     def test_keyboard_buttons(self):
         kb = kbm.status_inline_keyboard("DB1234")
         data = [b.callback_data for row in kb.keyboard for b in row]
-        self.assertEqual(data, [f"st:DB1234:{s}" for s in m.TRACK_STATUSES])
+        self.assertEqual(data, [f"st:DB1234:{s}" for s in m.TRACK_STATUSES] + ["st:DB1234:payreq"])
         for d in data:
             self.assertLessEqual(len(d.encode()), 64)
 

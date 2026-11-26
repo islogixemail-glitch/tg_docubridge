@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS digest_log (
     sent_at     TIMESTAMPTZ,
     info        TEXT
 );
+CREATE TABLE IF NOT EXISTS handoff_log (
+    id          BIGSERIAL PRIMARY KEY,
+    chat_id     BIGINT NOT NULL,
+    scope       TEXT NOT NULL DEFAULT 'client',
+    reason      TEXT,
+    ticket      TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS handoff_log_chat_idx ON handoff_log (chat_id, scope, created_at);
 """
 
 
@@ -304,3 +313,151 @@ def digest_shipments(exclude_chat_id: int, limit: int = 300) -> Optional[List[Di
         return rows
 
     return _run("digest_shipments", _do, default=None)
+
+
+# ------------ «Нужен человек» throttle (handoff_log) ------------
+
+def claim_handoff(chat_id: int, scope: str, reason: str, ticket: Optional[str],
+                  window_min: int) -> Optional[bool]:
+    """True = first handoff card for (chat, scope) within window_min → send it;
+    False = one was sent recently → skip; None = DB unavailable (caller decides)."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO handoff_log (chat_id, scope, reason, ticket)
+            SELECT %s, %s, %s, %s
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM handoff_log
+                    WHERE chat_id = %s AND scope = %s
+                      AND created_at > NOW() - (%s * INTERVAL '1 minute'))
+            RETURNING id
+            """,
+            (int(chat_id), scope, reason, ticket, int(chat_id), scope, int(window_min)),
+        )
+        ok = cur.fetchone() is not None
+        conn.commit()
+        cur.close()
+        return ok
+
+    return _run("claim_handoff", _do, default=None, retry=False)
+
+
+def set_pay_currency(ticket: str, chat_id: int, currency: str):
+    """Store the chosen currency on the client's own order (idempotent overwrite).
+    dict (the order payload) = stored; False = no such order for this chat (stale/foreign
+    button); None = DB down."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE shipments SET pay_currency = %s, pay_currency_at = NOW()
+             WHERE UPPER(ticket) = UPPER(%s) AND chat_id = %s
+            RETURNING payload
+            """,
+            (currency, ticket, int(chat_id)),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return (dict(row[0] or {}) if isinstance(row[0], dict) else {}) if row else False
+
+    return _run("set_pay_currency", _do, default=None, retry=False)
+
+
+def accept_terms(ticket: str, chat_id: int):
+    """Mark «условия подходят» once per order (terms_accepted_at stays the first time).
+    {'first': bool, 'at': ts, 'payload': dict} | False (no such order in this chat) | None (DB down)."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE shipments SET terms_accepted_at = NOW()
+             WHERE UPPER(ticket) = UPPER(%s) AND chat_id = %s AND terms_accepted_at IS NULL
+            RETURNING terms_accepted_at, payload
+            """,
+            (ticket, int(chat_id)),
+        )
+        row = cur.fetchone()
+        first = row is not None
+        if not first:
+            cur.execute(
+                "SELECT terms_accepted_at, payload FROM shipments WHERE UPPER(ticket) = UPPER(%s) AND chat_id = %s",
+                (ticket, int(chat_id)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        if not row:
+            return False
+        return {"first": first, "at": row[0], "payload": dict(row[1] or {}) if isinstance(row[1], dict) else {}}
+
+    return _run("accept_terms", _do, default=None, retry=False)
+
+
+def mark_pay_requested(ticket: str):
+    """Documents arrived, payment requested: keep the first pay_requested_at. True | False (no order) | None (DB down)."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE shipments SET pay_requested_at = COALESCE(pay_requested_at, NOW())
+             WHERE UPPER(ticket) = UPPER(%s)
+            RETURNING pay_requested_at
+            """,
+            (ticket,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return bool(row)
+
+    return _run("mark_pay_requested", _do, default=None, retry=False)
+
+
+def pay_requested(ticket: str, chat_id: int):
+    """True once the admin requested payment for this chat's order; False otherwise; None = DB down."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT pay_requested_at FROM shipments WHERE UPPER(ticket) = UPPER(%s) AND chat_id = %s",
+            (ticket, int(chat_id)),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return bool(row and row[0])
+
+    return _run("pay_requested", _do, default=None)
+
+
+def get_order_pay_info(ticket: str) -> Optional[Dict]:
+    """{'ticket', 'chat_id', 'payload', 'pay_currency'} for the admin payment request; None if missing/DB down."""
+    if not DB_URL:
+        return None
+
+    def _do(conn):
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT ticket, chat_id, payload, pay_currency FROM shipments WHERE UPPER(ticket) = UPPER(%s)",
+            (ticket,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return dict(row) if row else None
+
+    return _run("get_order_pay_info", _do, default=None)

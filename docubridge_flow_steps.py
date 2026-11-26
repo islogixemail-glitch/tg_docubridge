@@ -129,16 +129,29 @@ def handle_track_ticket(chat_id: int, text: str):
     status_ru = TRACK_STATUS_RU.get(status, status)
     # Pipeline progress
     msg = format_track_message(row, get_shipment_events(row["ticket"]))
+    try:
+        own = row.get("chat_id") is not None and int(row["chat_id"]) == int(chat_id)
+    except (TypeError, ValueError):
+        own = False
+    if own:   # payment / handover hints only for the order's own chat
+        from docubridge_next_steps import track_hint
+        import docubridge_lang as lang_mod
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        lang = lang_mod.get_lang(chat_id, default=payload.get("lang") or "ru")
+        hint = track_hint(status, payload, lang)
+        if hint:
+            msg += "\n\n" + hint
     save_message(chat_id, text, msg)
     bot.send_message(chat_id, msg, reply_markup=main_menu())
     set_state(chat_id, "greeting", {})
 
 
 def contact_manager(chat_id: int):
-    msg = (
-        f"Связь с менеджером: {MANAGER_CONTACT}\n"
-        "Или оформите заявку через «Отправить документы» — мы свяжемся по телефону."
-    )
+    import docubridge_lang as lang_mod
+    from docubridge_texts import t as tr
+    import docubridge_payment_config as pcfg
+    lang = lang_mod.get_lang(chat_id)
+    msg = tr("contact_manager", lang, manager=MANAGER_CONTACT, rt=pcfg.RESPONSE_TIME[lang])
     save_message(chat_id, None, msg)
     bot.send_message(chat_id, msg, reply_markup=main_menu())
     set_state(chat_id, "greeting", {})

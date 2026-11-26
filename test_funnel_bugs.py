@@ -69,7 +69,8 @@ class TestFunnelFixes(Base):
                 mock.patch.object(fpost, "notify_admin_lead"), \
                 mock.patch.object(fpost, "export_shipment_async"):
             h.any_text(msg(m.BTN_CONFIRM))
-        self.assertEqual(self.states[CHAT], ("completed", {"ticket": "DB4242"}))
+        self.assertEqual(self.states[CHAT][0], "completed")
+        self.assertEqual(self.states[CHAT][1]["ticket"], "DB4242")
         self.assertIn("DB4242", self.texts())
 
     def test_start_logged_and_recorded(self):

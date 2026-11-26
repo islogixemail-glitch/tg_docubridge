@@ -180,7 +180,7 @@ class TestBackAndManager(FunnelBase):
 
 class TestOffStepQuestions(FunnelBase):
     def test_question_on_city_answers_and_keeps_buttons(self):
-        self.to_quote(); self.say(m.BTN_APPLY, "а как оплатить?")
+        self.to_quote(); self.say(m.BTN_APPLY, "а это надёжно?")
         self.assertEqual(self.state(), "ask_from_city")
         self.assertNotIn("from_city", self.data())
         text, kb = self.last()
@@ -250,9 +250,11 @@ class TestEditAndFinish(FunnelBase):
         with mock.patch.object(fpost, "create_shipment", return_value="DB777"), \
                 mock.patch.object(fpost, "notify_admin_lead"), mock.patch.object(fpost, "export_shipment_async"):
             self.say(m.BTN_CONFIRM)
-        t = self.last()[0]
-        for w in ("DB777", "Что дальше", "Менеджер свяжется", "+380671234567", "/track"):
+        t = self.sent[-3][0]
+        for w in ("DB777", "Что дальше", "Оплата", "Передача документов", "/track", "€140"):
             self.assertIn(w, t)
+        self.assertNotIn("Менеджер свяжется", t)
+        self.assertIn("DB777", self.last()[0])
         self.assertEqual(self.state(), "completed")
 
     def test_legacy_chat_without_doc_goes_to_doc_then_summary(self):

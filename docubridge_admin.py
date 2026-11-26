@@ -62,14 +62,9 @@ def format_order_card(row: Dict, events) -> str:
     return "\n".join(lines)
 
 
-def client_status_message(ticket: str, status: str, comment: Optional[str]) -> str:
-    msg = (
-        f"📦 Отправление {ticket}: новый статус — «{TRACK_STATUS_RU.get(status, status)}»."
-    )
-    if comment:
-        msg += f"\nКомментарий / трек-номер перевозчика: {comment}"
-    msg += "\nПодробнее: /track"
-    return msg
+def client_status_message(ticket: str, status: str, comment: Optional[str], lang: str = "ru") -> str:
+    from docubridge_next_steps import client_status_message as _msg
+    return _msg(ticket, status, comment, lang)
 
 
 def apply_status_change(ticket: str, status_raw: str, comment: Optional[str] = None):
@@ -90,7 +85,9 @@ def apply_status_change(ticket: str, status_raw: str, comment: Optional[str] = N
     status_ru = TRACK_STATUS_RU[status]
     client_note = ""
     try:
-        bot.send_message(int(row["chat_id"]), client_status_message(row["ticket"], status, comment))
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        lang = (payload or {}).get("lang") or "ru"
+        bot.send_message(int(row["chat_id"]), client_status_message(row["ticket"], status, comment, lang))
         client_note = "клиент уведомлён"
     except Exception as e:
         print(f"[ADMIN status] client notify error: {e}")
@@ -142,6 +139,60 @@ def admin_status(message):
     bot.send_message(message.chat.id, msg if ok else msg + "\n\n" + STATUS_USAGE)
 
 
+# «Документы получены — запросить оплату». The existing statuses do not say «arrived in
+# Bratislava / at the Moscow agent» unambiguously, so this is a separate admin action:
+# button under the lead card (st:<ticket>:payreq) and /payreq DB1234.
+PAYREQ_CB_STATUS = "payreq"
+
+
+def request_payment(ticket: str):
+    """Send the client «документы поступили — нужна оплата» + details of the chosen currency
+    (or the currency choice / fallback). Returns (ok, message_for_admin). No status change."""
+    import docubridge_next_steps as ns
+    import docubridge_db_notify as ndb
+    import docubridge_lang as lang_mod
+    ticket = (ticket or "").strip().upper()
+    if not is_valid_ticket_format(ticket):
+        return False, "Неверный номер. Формат: DB1234"
+    row = ndb.get_order_pay_info(ticket)
+    if not row:
+        return False, f"Заявка {ticket} не найдена (или БД недоступна)."
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    chat_id = int(row["chat_id"])
+    lang = lang_mod.norm(payload.get("lang") or lang_mod.get_lang(chat_id))
+    cur = row.get("pay_currency")
+    text = ns.payment_request_text(row["ticket"], payload, cur, lang)
+    kb = (ns.after_payment_keyboard(row["ticket"], lang) if cur
+          else ns.currency_keyboard(row["ticket"], with_actions=False, lang=lang))
+    try:
+        bot.send_message(chat_id, text, reply_markup=kb)
+    except Exception as e:
+        print(f"[ADMIN payreq] client notify error: {e}")
+        return False, f"Не удалось отправить клиенту просьбу об оплате по {row['ticket']}."
+    if ndb.mark_pay_requested(row["ticket"]) is not True:
+        print(f"[ADMIN payreq] {row['ticket']}: pay_requested_at not stored")
+        not_saved = "\n⚠️ Отметка «оплата запрошена» не сохранена в БД — реквизиты по кнопке валюты клиент не получит, пришлите вручную."
+    else:
+        not_saved = ""
+    if cur and not ns.pcfg.payment_text_for(cur):
+        note = f"⚠️ {row['ticket']}: клиент выбрал {cur}, реквизитов нет, пришлите вручную"
+    else:
+        note = ""
+    who = f"валюта: {cur}" if cur else "валюта не выбрана — клиенту показан выбор валюты"
+    msg = f"✅ {row['ticket']}: клиенту отправлена просьба об оплате ({who})."
+    return True, msg + (f"\n{note}" if note else "") + not_saved
+
+
+@bot.message_handler(commands=["payreq"], func=lambda m: is_admin(m.chat.id))
+def admin_payreq(message):
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, "Использование: /payreq DB1234 — документы получены, запросить оплату")
+        return
+    ok, msg = request_payment(parts[1])
+    bot.send_message(message.chat.id, msg)
+
+
 def can_press_status(user_id) -> bool:
     """By the presser's user id (not the chat): admin + LEADS_MANAGER_IDS."""
     from docubridge_notify import can_manage
@@ -160,7 +211,10 @@ def admin_status_button(call):
     except ValueError:
         bot.answer_callback_query(call.id, "Некорректные данные")
         return
-    ok, msg = apply_status_change(ticket, status)
+    if status == PAYREQ_CB_STATUS:
+        ok, msg = request_payment(ticket)
+    else:
+        ok, msg = apply_status_change(ticket, status)
     bot.answer_callback_query(call.id, msg[:190])
     if call.message:
         if getattr(call.message.chat, "type", "private") != "private":

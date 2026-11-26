@@ -375,6 +375,12 @@ def ensure_tables() -> bool:
             -- Google Sheet outbox: synced = row is in the sheet; claimed = lease while exporting
             ALTER TABLE shipments ADD COLUMN IF NOT EXISTS sheet_synced_at TIMESTAMPTZ;
             ALTER TABLE shipments ADD COLUMN IF NOT EXISTS sheet_claimed_at TIMESTAMPTZ;
+            -- currency the client chose for payment after the order (bot autonomy)
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS pay_currency TEXT;
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS pay_currency_at TIMESTAMPTZ;
+            -- client accepted the terms → the manager sends the shipping address
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;
+            ALTER TABLE shipments ADD COLUMN IF NOT EXISTS pay_requested_at TIMESTAMPTZ;
             -- One-off admin broadcasts: one row per (campaign, chat) = never sent twice
             CREATE TABLE IF NOT EXISTS broadcast_log (
                 campaign TEXT NOT NULL,

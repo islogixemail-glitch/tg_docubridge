@@ -225,6 +225,8 @@ def status_inline_keyboard(ticket: str) -> InlineKeyboardMarkup:
             for st in TRACK_STATUSES
         ]
     )
+    kb.row(InlineKeyboardButton("📥 Документы получены — запросить оплату",
+                                callback_data=f"{STATUS_CB_PREFIX}:{ticket}:payreq"))
     return kb
 
 

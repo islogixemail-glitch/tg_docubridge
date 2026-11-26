@@ -36,7 +36,7 @@ START_PAYLOAD_ROUTES = {
 
 
 HUB_CB_PREFIX = "hub"
-KNOWN_COMMANDS = {"start", "help", "track", "menu", "reset", "ai", "orders", "order", "status", "stats"}
+KNOWN_COMMANDS = {"start", "help", "track", "menu", "reset", "ai", "orders", "order", "status", "stats", "payreq"}
 BOTFATHER_COMMANDS = [
     ("start", "Главное меню и выбор маршрута"),
     ("help", "Справка: что делает бот и как получить расчёт"),

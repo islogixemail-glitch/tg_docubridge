@@ -22,6 +22,7 @@ import docubridge_admin as _admin  # noqa: F401  (registers admin handlers befor
 from docubridge_admin import *  # noqa: F401,F403
 import docubridge_broadcast as _broadcast  # noqa: F401  (/broadcast_stuck + its buttons, before catch-all)
 import docubridge_notify as _notify  # noqa: F401  (/chatid, /digest, my_chat_member, before catch-all)
+import docubridge_handoff as _handoff  # noqa: F401  (attachments, «Что дальше» buttons)
 from docubridge_notify import start_notify_thread, notify_health, update_allowed
 from docubridge_db_notify import ensure_notify_tables
 
@@ -187,7 +188,8 @@ def any_text(message):
         send_fallback(message.chat.id)
         return
     handle_answer(message.chat.id, message.text or "",
-                  tg_name=profile_name(getattr(message, "from_user", None)))
+                  tg_name=profile_name(getattr(message, "from_user", None)),
+                  user=getattr(message, "from_user", None))
 
 
 # ------------ Webhook ------------
